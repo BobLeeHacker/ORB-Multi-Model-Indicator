@@ -1103,6 +1103,35 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
                     _bdmBearWaitBars   := 0
 
 // ============================================================
+// SECTION 17A-SCORE — CONFLUENCE SCORE POST-PASS
+// Runs after ALL models so _agreeCountBull/Bear are fully accumulated.
+// Recomputes score every bar for any model that has fired today (_dashSignal != 0).
+// TF routing: M1/Combined → fast TF params; M3/M4/M6/M7/M9 → primary TF params; M10 → mixed.
+// ============================================================
+
+// mIdxs: model IDs (1,3,4,6,7,9,11) — must match dashboard mIdxs exactly
+var int[] _scoreModelIdxs = array.from(1, 3, 4, 6, 7, 9, 11)
+
+// TF selector per model: true = use fast TF data, false = use primary TF data
+// Index maps to mIdxs: M1=fast, M3=primary, M4=primary, M6=primary, M7=primary, M9=primary, M10=fast(price)+primary(rsi)
+var bool[] _scoreFast     = array.from(true, false, false, false, false, false, true)
+
+for _si = 0 to 6
+    _sModelId = array.get(_scoreModelIdxs, _si)
+    _sArrIdx  = _sModelId - 1
+    _sDashSig = array.get(_dashSignal, _sArrIdx)
+    if _sDashSig != 0
+        _sIsBull  = _sDashSig == 1
+        _sUseFast = array.get(_scoreFast, _si)
+        _sRc   = _sUseFast ? fast_close  : ref_close
+        _sRvol = _sUseFast ? fast_rvol   : ref_rvol
+        _sVwap = _sUseFast ? fast_vwap   : ref_vwap
+        // RSI: M10 uses primary TF RSI even though price is fast TF
+        _sRsi  = (_sModelId == 11) ? ref_rsi14 : (_sUseFast ? fast_rsi14 : ref_rsi14)
+        _score = f_modelScore(_sIsBull, _sRc, _sRvol, _sVwap, _sRsi)
+        array.set(_lastScore, _sArrIdx, _score)
+
+// ============================================================
 // SECTION 17B — TRADE STATUS TRACKER (inline, global scope)
 // Resolves active trades against bar price action each bar
 // ============================================================
