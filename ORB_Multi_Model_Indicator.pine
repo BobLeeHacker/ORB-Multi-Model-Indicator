@@ -37,8 +37,11 @@ i_m6_on = input.bool(false, "Model 6 — FVG ORB",             group="Model Togg
 i_m7_on = input.bool(true,  "Model 7 — Gold ORB",            group="Model Toggles")
 i_m9_on = input.bool(false, "Model 9 — Failed ORB Reversal", group="Model Toggles",
      tooltip="Disabled by default — CSV backtest shows 25–67% WR (inconsistent across pairs/TFs).")
-i_m10_on = input.bool(false, "Model 10 — BDM ORB",            group="Model Toggles",
+i_m10_on   = input.bool(false, "Model 10 — BDM ORB",            group="Model Toggles",
      tooltip="Big Daddy Max's 3-phase ORB: 5-min breakout → 1-min retest → 1-min bounce entry.")
+i_minAgree = input.int(1, "Min Models to Show Signal", minval=1, maxval=4,
+     tooltip="Plotshape and alert only shown if at least this many models agree on direction. Set to 2 for consensus mode. Dashboard score always updates regardless.",
+     group="Model Toggles")
 
 // ── Model 1 (Crabel) ─────────────────────────────────────────
 i_m1_nr7    = input.bool(true,  "M1: Require NR7/NR4 compression", group="Model 1 — Crabel")
@@ -1479,21 +1482,26 @@ if i_showDashboard and i_mode == "Multi-Model"
     table.cell(_dashTable, 6, 0, "WIN%",    text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
     table.cell(_dashTable, 7, 0, "OR HIGH", text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
     table.cell(_dashTable, 8, 0, "OR LOW",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_dashTable, 9, 0, "ENTRY TF",text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_dashTable, 9, 0, "SCORE",   text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
 
     // Data rows — read from persistent _dashSignal and _lastEntry/SL/TP arrays
     orHStr = na(_or15H) ? "-" : str.tostring(_or15H, format.mintick)
     orLStr = na(_or15L) ? "-" : str.tostring(_or15L, format.mintick)
 
-    mNames = array.from("1.Crabel","3.5min","4.15min","6.FVG","7.Gold","9.FailORB","10.BDM")
+    mNames = array.from("★★ 1.Crabel","★★★ 3.5min","★★★ 4.15min","★ 6.FVG","★ 7.Gold","★ 9.FailORB","★★ 10.BDM")
     mIdxs  = array.from(1, 3, 4, 6, 7, 9, 11)
 
-    // Actual reference TF per model (driven by i_refTF_fast / i_refTF inputs):
-    // M1 Crabel      → fast TF (i_refTF_fast, default 1m)
-    // M3/M4/M6/M7/M9 → primary TF (i_refTF, default 5m)
-    // M10 BDM        → Phase 1: primary TF (5m); Phase 2/3: fast TF (1m)
-    C_TF = color.new(#00BCD4, 0)  // cyan — distinct from signal colours
-    mTFs = array.from(i_refTF_fast, i_refTF, i_refTF, i_refTF, i_refTF, i_refTF, i_refTF_fast + "/" + i_refTF)
+    // Temp storage for BEST badge deferred re-render
+    var string[] _rowName   = array.new<string>(7, "")
+    var string[] _rowSig    = array.new<string>(7, "")
+    var string[] _rowDir    = array.new<string>(7, "")
+    var string[] _rowEnt    = array.new<string>(7, "")
+    var string[] _rowSl     = array.new<string>(7, "")
+    var string[] _rowTp     = array.new<string>(7, "")
+    var string[] _rowWr     = array.new<string>(7, "")
+    var color[]  _rowSigClr = array.new<color>(7, color.gray)
+    var color[]  _rowWrClr  = array.new<color>(7, color.gray)
+    var color[]  _rowBG     = array.new<color>(7, color.new(#1A1D26, 10))
 
     for i = 0 to 6
         _arrIdx = array.get(mIdxs, i) - 1  // model ID → backing array slot (M1→0, M3→2, ..., M10→10)
@@ -1524,7 +1532,52 @@ if i_showDashboard and i_mode == "Multi-Model"
         table.cell(_dashTable, 6, row, wrStr,                 text_color=wrClr,    bgcolor=rowBG, text_size=size.tiny)
         table.cell(_dashTable, 7, row, orHStr,                text_color=C_TXT_DIM,bgcolor=rowBG, text_size=size.tiny)
         table.cell(_dashTable, 8, row, orLStr,                text_color=C_TXT_DIM,bgcolor=rowBG, text_size=size.tiny)
-        table.cell(_dashTable, 9, row, array.get(mTFs, i),    text_color=C_TF,     bgcolor=rowBG, text_size=size.tiny)
+        scoreVal = array.get(_lastScore, _arrIdx)
+        scoreClr = scoreVal >= 70 ? color.new(#00E676,0) :
+                   scoreVal >= 50 ? color.new(#FF9800,0) :
+                   scoreVal >  0  ? color.new(#FF5252,0) : C_TXT_DIM
+        scoreStr = scoreVal > 0 ? str.tostring(scoreVal) : "-"
+        table.cell(_dashTable, 9, row, scoreStr, text_color=scoreClr, bgcolor=rowBG, text_size=size.tiny)
+        // Store for BEST badge deferred render
+        array.set(_rowName,   i, array.get(mNames, i))
+        array.set(_rowSig,    i, sigStr)
+        array.set(_rowDir,    i, dirStr)
+        array.set(_rowEnt,    i, entStr)
+        array.set(_rowSl,     i, slStr)
+        array.set(_rowTp,     i, tpStr)
+        array.set(_rowWr,     i, wrStr)
+        array.set(_rowSigClr, i, sigClr)
+        array.set(_rowWrClr,  i, wrClr)
+        array.set(_rowBG,     i, rowBG)
+
+    // ── BEST badge: highlight highest-scoring row in gold ─────────
+    _bestScore2 = 0
+    _bestRow2   = -1
+    for _bi2 = 0 to 6
+        _bs2 = array.get(_lastScore, array.get(mIdxs, _bi2) - 1)
+        if _bs2 > _bestScore2
+            _bestScore2 := _bs2
+            _bestRow2   := _bi2
+
+    if _bestRow2 >= 0 and not na(_dashTable)
+        GOLD_BG  = color.new(#FFD600, 70)
+        GOLD_TXT = color.new(#FFD600, 0)
+        _br      = _bestRow2 + 1  // table row (0 = header, 1–7 = models)
+        _bSigClr = array.get(_rowSigClr, _bestRow2)
+        _bWrClr  = array.get(_rowWrClr,  _bestRow2)
+        _bScoreVal = array.get(_lastScore, array.get(mIdxs, _bestRow2) - 1)
+        _bScoreStr = _bScoreVal > 0 ? str.tostring(_bScoreVal) : "-"
+        _bScoreClr = _bScoreVal >= 70 ? color.new(#00E676,0) : _bScoreVal >= 50 ? color.new(#FF9800,0) : color.new(#FF5252,0)
+        table.cell(_dashTable, 0, _br, array.get(_rowName, _bestRow2) + " ◀", text_color=GOLD_TXT, bgcolor=GOLD_BG, text_size=size.tiny)
+        table.cell(_dashTable, 1, _br, array.get(_rowSig,  _bestRow2),         text_color=_bSigClr,  bgcolor=GOLD_BG, text_size=size.tiny)
+        table.cell(_dashTable, 2, _br, array.get(_rowDir,  _bestRow2),         text_color=_bSigClr,  bgcolor=GOLD_BG, text_size=size.tiny)
+        table.cell(_dashTable, 3, _br, array.get(_rowEnt,  _bestRow2),         text_color=_bSigClr,  bgcolor=GOLD_BG, text_size=size.tiny)
+        table.cell(_dashTable, 4, _br, array.get(_rowSl,   _bestRow2),         text_color=color.new(#FF5252,0), bgcolor=GOLD_BG, text_size=size.tiny)
+        table.cell(_dashTable, 5, _br, array.get(_rowTp,   _bestRow2),         text_color=color.new(#69F0AE,0), bgcolor=GOLD_BG, text_size=size.tiny)
+        table.cell(_dashTable, 6, _br, array.get(_rowWr,   _bestRow2),         text_color=_bWrClr,   bgcolor=GOLD_BG, text_size=size.tiny)
+        table.cell(_dashTable, 7, _br, orHStr,                                  text_color=C_TXT_DIM,  bgcolor=GOLD_BG, text_size=size.tiny)
+        table.cell(_dashTable, 8, _br, orLStr,                                  text_color=C_TXT_DIM,  bgcolor=GOLD_BG, text_size=size.tiny)
+        table.cell(_dashTable, 9, _br, _bScoreStr,                              text_color=_bScoreClr, bgcolor=GOLD_BG, text_size=size.tiny)
 
 // ── Combined Mode Checklist ───────────────────────────────────
 if i_showDashboard and i_mode == "Combined"
@@ -1590,8 +1643,10 @@ if i_showDashboard and i_mode == "Multi-Model" and not na(_dashTable)
          text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
     table.cell(_dashTable, 3, 8, isNR7 ? "NR7" : isNR4 ? "NR4" : "-",
          text_color=isNR7 or isNR4 ? color.new(#FF9800,0) : C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 4, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 5, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    _bullAgStr = _agreeCountBull > 0 ? str.tostring(_agreeCountBull) + " BULL ↑" : "-"
+    _bearAgStr = _agreeCountBear > 0 ? str.tostring(_agreeCountBear) + " BEAR ↓" : "-"
+    table.cell(_dashTable, 4, 8, _bullAgStr, text_color=_agreeCountBull > 0 ? color.new(#00E676,0) : C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 5, 8, _bearAgStr, text_color=_agreeCountBear > 0 ? color.new(#FF5252,0) : C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
     table.cell(_dashTable, 6, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
     table.cell(_dashTable, 7, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
     table.cell(_dashTable, 8, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
@@ -1773,58 +1828,58 @@ while array.size(_labels) > 490
 // ============================================================
 
 // Model 1 — Classic Crabel
-plotshape(sig_m1_bull and i_m1_on and i_mode=="Multi-Model",
+plotshape(sig_m1_bull and i_m1_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
      title="M1 Crabel — Long",  style=shape.triangleup,   location=location.belowbar,
      color=i_colBull,  size=size.small,  text="M1",  textcolor=color.white)
-plotshape(sig_m1_bear and i_m1_on and i_mode=="Multi-Model",
+plotshape(sig_m1_bear and i_m1_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
      title="M1 Crabel — Short", style=shape.triangledown, location=location.abovebar,
      color=i_colBear,  size=size.small,  text="M1",  textcolor=color.white)
 
 // Model 3 — 5-Min Scalper
-plotshape(sig_m3_bull and i_m3_on and i_mode=="Multi-Model",
+plotshape(sig_m3_bull and i_m3_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
      title="M3 5min — Long",  style=shape.triangleup,   location=location.belowbar,
      color=color.new(#00BCD4,0), size=size.small, text="M3", textcolor=color.white)
-plotshape(sig_m3_bear and i_m3_on and i_mode=="Multi-Model",
+plotshape(sig_m3_bear and i_m3_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
      title="M3 5min — Short", style=shape.triangledown, location=location.abovebar,
      color=color.new(#00BCD4,0), size=size.small, text="M3", textcolor=color.white)
 
 // Model 4 — Standard 15-Min (larger arrow — reference model)
-plotshape(sig_m4_bull and i_m4_on and i_mode=="Multi-Model",
+plotshape(sig_m4_bull and i_m4_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
      title="M4 15min — Long",  style=shape.arrowup,   location=location.belowbar,
      color=i_colBull,  size=size.normal, text="M4", textcolor=color.white)
-plotshape(sig_m4_bear and i_m4_on and i_mode=="Multi-Model",
+plotshape(sig_m4_bear and i_m4_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
      title="M4 15min — Short", style=shape.arrowdown, location=location.abovebar,
      color=i_colBear,  size=size.normal, text="M4", textcolor=color.white)
 
 // Model 6 — FVG ORB
-plotshape(sig_m6_bull and i_m6_on and i_mode=="Multi-Model",
+plotshape(sig_m6_bull and i_m6_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
      title="M6 FVG — Long",  style=shape.diamond, location=location.belowbar,
      color=color.new(#E040FB,0), size=size.small, text="M6", textcolor=color.white)
-plotshape(sig_m6_bear and i_m6_on and i_mode=="Multi-Model",
+plotshape(sig_m6_bear and i_m6_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
      title="M6 FVG — Short", style=shape.diamond, location=location.abovebar,
      color=color.new(#E040FB,0), size=size.small, text="M6", textcolor=color.white)
 
 // Model 7 — Gold ORB
-plotshape(sig_m7_bull and i_m7_on and i_mode=="Multi-Model",
+plotshape(sig_m7_bull and i_m7_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
      title="M7 Gold — Long",  style=shape.circle, location=location.belowbar,
      color=color.new(#FFD600,0), size=size.small, text="M7", textcolor=color.white)
-plotshape(sig_m7_bear and i_m7_on and i_mode=="Multi-Model",
+plotshape(sig_m7_bear and i_m7_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
      title="M7 Gold — Short", style=shape.circle, location=location.abovebar,
      color=color.new(#FFD600,0), size=size.small, text="M7", textcolor=color.white)
 
 // Model 9 — Failed ORB Reversal
-plotshape(sig_m9_bull and i_m9_on and i_mode=="Multi-Model",
+plotshape(sig_m9_bull and i_m9_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
      title="M9 FailORB — Long",  style=shape.xcross, location=location.belowbar,
      color=i_colBull,  size=size.small, text="M9", textcolor=color.white)
-plotshape(sig_m9_bear and i_m9_on and i_mode=="Multi-Model",
+plotshape(sig_m9_bear and i_m9_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
      title="M9 FailORB — Short", style=shape.xcross, location=location.abovebar,
      color=i_colBear,  size=size.small, text="M9", textcolor=color.white)
 
 // Model 10 — BDM ORB
-plotshape(sig_m10_bull and i_m10_on and i_mode=="Multi-Model",
+plotshape(sig_m10_bull and i_m10_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
      title="M10 BDM — Long",  style=shape.triangleup,   location=location.belowbar,
      color=i_colBull, size=size.small, text="M10", textcolor=color.white)
-plotshape(sig_m10_bear and i_m10_on and i_mode=="Multi-Model",
+plotshape(sig_m10_bear and i_m10_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
      title="M10 BDM — Short", style=shape.triangledown, location=location.abovebar,
      color=i_colBear, size=size.small, text="M10", textcolor=color.white)
 
@@ -1840,29 +1895,31 @@ plotshape(sig_comb_bear and i_mode=="Combined",
 // SECTION 22 — ALERT CONDITIONS (global scope, Pine v6)
 // ============================================================
 
-alertcondition(sig_m1_bull, title="M1 Crabel — LONG",               message="ORB M1 Crabel LONG | {{ticker}} | {{close}}")
-alertcondition(sig_m1_bear, title="M1 Crabel — SHORT",              message="ORB M1 Crabel SHORT | {{ticker}} | {{close}}")
-alertcondition(sig_m3_bull, title="M3 5min Scalper — LONG",         message="ORB M3 5min LONG | {{ticker}} | {{close}}")
-alertcondition(sig_m3_bear, title="M3 5min Scalper — SHORT",        message="ORB M3 5min SHORT | {{ticker}} | {{close}}")
-alertcondition(sig_m4_bull, title="M4 Standard 15-Min — LONG",      message="ORB M4 15min LONG | {{ticker}} | {{close}}")
-alertcondition(sig_m4_bear, title="M4 Standard 15-Min — SHORT",     message="ORB M4 15min SHORT | {{ticker}} | {{close}}")
-alertcondition(sig_m6_bull, title="M6 FVG ORB — LONG",              message="ORB M6 FVG LONG | {{ticker}} | {{close}}")
-alertcondition(sig_m6_bear, title="M6 FVG ORB — SHORT",             message="ORB M6 FVG SHORT | {{ticker}} | {{close}}")
-alertcondition(sig_m7_bull, title="M7 Gold ORB — LONG",             message="ORB M7 Gold LONG | {{ticker}} | {{close}}")
-alertcondition(sig_m7_bear, title="M7 Gold ORB — SHORT",            message="ORB M7 Gold SHORT | {{ticker}} | {{close}}")
-alertcondition(sig_m9_bull,  title="M9 Failed ORB — LONG (Reversal)", message="ORB M9 FailORB LONG | {{ticker}} | {{close}}")
-alertcondition(sig_m9_bear,  title="M9 Failed ORB — SHORT (Reversal)",message="ORB M9 FailORB SHORT | {{ticker}} | {{close}}")
-alertcondition(sig_m10_bull, title="M10 BDM ORB — LONG",              message="ORB M10 BDM LONG | {{ticker}} | {{close}}")
-alertcondition(sig_m10_bear, title="M10 BDM ORB — SHORT",             message="ORB M10 BDM SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m1_bull  and _agreeCountBull >= i_minAgree, title="M1 Crabel — LONG",               message="ORB M1 Crabel LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m1_bear  and _agreeCountBear >= i_minAgree, title="M1 Crabel — SHORT",              message="ORB M1 Crabel SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m3_bull  and _agreeCountBull >= i_minAgree, title="M3 5min Scalper — LONG",         message="ORB M3 5min LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m3_bear  and _agreeCountBear >= i_minAgree, title="M3 5min Scalper — SHORT",        message="ORB M3 5min SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m4_bull  and _agreeCountBull >= i_minAgree, title="M4 Standard 15-Min — LONG",      message="ORB M4 15min LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m4_bear  and _agreeCountBear >= i_minAgree, title="M4 Standard 15-Min — SHORT",     message="ORB M4 15min SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m6_bull  and _agreeCountBull >= i_minAgree, title="M6 FVG ORB — LONG",              message="ORB M6 FVG LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m6_bear  and _agreeCountBear >= i_minAgree, title="M6 FVG ORB — SHORT",             message="ORB M6 FVG SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m7_bull  and _agreeCountBull >= i_minAgree, title="M7 Gold ORB — LONG",             message="ORB M7 Gold LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m7_bear  and _agreeCountBear >= i_minAgree, title="M7 Gold ORB — SHORT",            message="ORB M7 Gold SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m9_bull  and _agreeCountBull >= i_minAgree, title="M9 Failed ORB — LONG (Reversal)", message="ORB M9 FailORB LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m9_bear  and _agreeCountBear >= i_minAgree, title="M9 Failed ORB — SHORT (Reversal)",message="ORB M9 FailORB SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m10_bull and _agreeCountBull >= i_minAgree, title="M10 BDM ORB — LONG",              message="ORB M10 BDM LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m10_bear and _agreeCountBear >= i_minAgree, title="M10 BDM ORB — SHORT",             message="ORB M10 BDM SHORT | {{ticker}} | {{close}}")
 alertcondition(sig_comb_bull, title="Combined ORB+ — LONG",  message="ORB Combined LONG | {{ticker}} | {{close}}")
 alertcondition(sig_comb_bear, title="Combined ORB+ — SHORT", message="ORB Combined SHORT | {{ticker}} | {{close}}")
 
 // Catch-all
 alertcondition(
-     sig_m1_bull or sig_m3_bull or sig_m4_bull or sig_m6_bull or sig_m7_bull or sig_m9_bull or sig_m10_bull or sig_comb_bull,
+     sig_comb_bull or
+     ((sig_m1_bull or sig_m3_bull or sig_m4_bull or sig_m6_bull or sig_m7_bull or sig_m9_bull or sig_m10_bull) and _agreeCountBull >= i_minAgree),
      title="ANY ORB — LONG",  message="ORB Signal LONG | {{ticker}} | {{close}}")
 alertcondition(
-     sig_m1_bear or sig_m3_bear or sig_m4_bear or sig_m6_bear or sig_m7_bear or sig_m9_bear or sig_m10_bear or sig_comb_bear,
+     sig_comb_bear or
+     ((sig_m1_bear or sig_m3_bear or sig_m4_bear or sig_m6_bear or sig_m7_bear or sig_m9_bear or sig_m10_bear) and _agreeCountBear >= i_minAgree),
      title="ANY ORB — SHORT", message="ORB Signal SHORT | {{ticker}} | {{close}}")
 
 // ============================================================
