@@ -42,7 +42,9 @@ i_m10_on = input.bool(false, "Model 10 — BDM ORB",            group="Model Tog
 
 // ── Model 1 (Crabel) ─────────────────────────────────────────
 i_m1_nr7    = input.bool(true,  "M1: Require NR7/NR4 compression", group="Model 1 — Crabel")
-i_m1_rratio = input.float(2.0,  "M1: Risk/Reward ratio",           group="Model 1 — Crabel", minval=1.0, step=0.5)
+i_m1_rratio  = input.float(2.0,  "M1: Risk/Reward ratio",           group="Model 1 — Crabel", minval=1.0, step=0.5)
+i_m1_volMult = input.float(1.2,  "M1: Min RVOL (0 = off)",          group="Model 1 — Crabel", minval=0.0, step=0.1,
+     tooltip="Minimum relative volume for M1 signal. Set to 0 to disable the volume filter.")
 
 // ── Model 3 (5-Min Scalper) ──────────────────────────────────
 i_m3_volMult = input.float(1.5, "M3: Min volume multiplier (vs avg)", group="Model 3 — 5-Min Scalper",
@@ -65,6 +67,8 @@ i_m6_rratio     = input.float(2.0, "M6: Risk/Reward ratio",             group="M
 i_m7_cutoffHour = input.int(12,   "M7: Cutoff hour EST (no entries after)", group="Model 7 — Gold ORB",
      minval=10, maxval=15)
 i_m7_rratio     = input.float(2.0, "M7: Risk/Reward ratio", group="Model 7 — Gold ORB", minval=1.0, step=0.5)
+i_m7_volMult    = input.float(1.2, "M7: Min RVOL (0 = off)", group="Model 7 — Gold ORB", minval=0.0, step=0.1,
+     tooltip="Minimum relative volume for M7 Gold ORB signal. Set to 0 to disable.")
 
 // ── Model 9 (Failed ORB) ─────────────────────────────────────
 i_m9_rratio   = input.float(2.0, "M9: Risk/Reward ratio",              group="Model 9 — Failed ORB",
@@ -73,9 +77,9 @@ i_m9_failBars = input.int(5,     "M9: Bars inside to confirm failure",  group="M
      minval=2, maxval=10)
 
 // ── Model 10 (BDM ORB) ───────────────────────────────────────
-i_bdm_retestTol = input.float(0.05, "BDM: Retest tolerance (% of price)", group="Model 10 — BDM ORB",
-     minval=0.01, maxval=1.0, step=0.01,
-     tooltip="How close 1-min close must come to OR level to count as a retest.\n0.05% = $2.50 on a $5,000 asset. Adjust upward for low-priced instruments.")
+i_bdm_retestTol = input.float(0.15, "BDM: Retest tolerance (× ATR)", group="Model 10 — BDM ORB",
+     minval=0.01, maxval=2.0, step=0.01,
+     tooltip="How close 1-min close must pull back to the breakout level to qualify as a retest, expressed as a multiple of ATR14. 0.15 = within 15% of one ATR. Increase for wider tolerance on volatile instruments like Gold.")
 i_bdm_slMult    = input.float(0.5,  "BDM: SL ATR multiplier",            group="Model 10 — BDM ORB",
      minval=0.25, maxval=3.0, step=0.25,
      tooltip="SL = OR break level ± (ATR × multiplier). Anchored at OR level, not entry close.")
@@ -692,13 +696,14 @@ f_modelScore(isBull, _rc, _rvol, _rvwap, _rsi) =>
 
 // ── Model 1: Classic Crabel ───────────────────────────────────
 // Uses fast TF data (_rc/_rc1/_ratr/_edge) — defaults 1m per CSV backtest (60–67% WR)
-f_model1(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge) =>
+f_model1(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol) =>
     bull = false
     bear = false
     if _orCrabelComplete and not na(_orCrabelH) and not na(_orCrabelL)
         if _edge and not pastCutoff and inNYSession
             nrPass = i_m1_nr7 ? (isNR7 or isNR4) : true
-            if nrPass
+            volOk  = i_m1_volMult <= 0 or _rvol >= i_m1_volMult
+            if nrPass and volOk
                 slDist = _ratr * i_atrMult
                 // Bull breakout: entryP = OR breakout level (buy-stop price, TF-consistent).
                 // close > _orCrabelH confirms breakout; SL/TP are anchored to the OR level.
@@ -781,13 +786,14 @@ f_model4(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap, _rrsi) 
 
 // ── Model 7: Gold ORB ─────────────────────────────────────────
 // Uses primary TF data — 5m per CSV backtest (46–48% WR; marginal but included)
-f_model7(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge) =>
+f_model7(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap) =>
     bull = false
     bear = false
     if _or15Complete and not na(_or15H) and not na(_or15L)
         if _edge and nyHour < i_m7_cutoffHour and inNYSession
             slDist = _ratr * i_atrMult
-            if _rc > _or15H and _rc1 <= _or15H and not _firedBull
+            volOk  = i_m7_volMult <= 0 or _rvol >= i_m7_volMult
+            if _rc > _or15H and _rc1 <= _or15H and not _firedBull and volOk and _rc > _rvwap
                 bull   := true
                 entryP  = _or15H
                 slP     = entryP - slDist
@@ -795,7 +801,7 @@ f_model7(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge) =>
                 f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
                 f_drawLabel("M7 Gold", entryP, slP, tpP, true, 2.2)
                 f_registerTrade(7, entryP, slP, tpP, true)
-            if _rc < _or15L and _rc1 >= _or15L and not _firedBear
+            if _rc < _or15L and _rc1 >= _or15L and not _firedBear and volOk and _rc < _rvwap
                 bear   := true
                 entryP  = _or15L
                 slP     = entryP + slDist
@@ -812,40 +818,48 @@ f_model7(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge) =>
 if i_mode == "Multi-Model"
     if i_m1_on
         // M1 uses fast TF (default 1m) — best per CSV backtest
-        [b, s] = f_model1(_m1FiredBull, _m1FiredBear, fast_close, fast_close1, fast_atr14, _fastEdge)
+        [b, s] = f_model1(_m1FiredBull, _m1FiredBear, fast_close, fast_close1, fast_atr14, _fastEdge, fast_rvol)
         sig_m1_bull := b
         sig_m1_bear := s
         if b
-            _m1FiredBull := true
+            _m1FiredBull    := true
+            _agreeCountBull += 1
         if s
-            _m1FiredBear := true
+            _m1FiredBear    := true
+            _agreeCountBear += 1
     if i_m3_on
         // M3 uses primary TF (default 5m) — best per CSV backtest
         [b, s] = f_model3(_m3FiredBull, _m3FiredBear, ref_close, ref_close1, ref_atr14, _refEdge, ref_rvol, ref_vwap)
         sig_m3_bull := b
         sig_m3_bear := s
         if b
-            _m3FiredBull := true
+            _m3FiredBull    := true
+            _agreeCountBull += 1
         if s
-            _m3FiredBear := true
+            _m3FiredBear    := true
+            _agreeCountBear += 1
     if i_m4_on
         // M4 uses primary TF (default 5m)
         [b, s] = f_model4(_m4FiredBull, _m4FiredBear, ref_close, ref_close1, ref_atr14, _refEdge, ref_rvol, ref_vwap, ref_rsi14)
         sig_m4_bull := b
         sig_m4_bear := s
         if b
-            _m4FiredBull := true
+            _m4FiredBull    := true
+            _agreeCountBull += 1
         if s
-            _m4FiredBear := true
+            _m4FiredBear    := true
+            _agreeCountBear += 1
     if i_m7_on
         // M7 uses primary TF (default 5m)
-        [b, s] = f_model7(_m7FiredBull, _m7FiredBear, ref_close, ref_close1, ref_atr14, _refEdge)
+        [b, s] = f_model7(_m7FiredBull, _m7FiredBear, ref_close, ref_close1, ref_atr14, _refEdge, ref_rvol, ref_vwap)
         sig_m7_bull := b
         sig_m7_bear := s
         if b
-            _m7FiredBull := true
+            _m7FiredBull    := true
+            _agreeCountBull += 1
         if s
-            _m7FiredBear := true
+            _m7FiredBear    := true
+            _agreeCountBear += 1
 
 // ============================================================
 // SECTION 15 — MODEL 6: FVG ORB (INLINE — stateful)
@@ -870,6 +884,7 @@ if i_m6_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and 
                     f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
                     f_drawLabel("M6 FVG", entryP, slP, tpP, true, 1.4)
                     f_registerTrade(6, entryP, slP, tpP, true)
+                    _agreeCountBull += 1
                     if i_showBox
                         array.push(_boxes, box.new(bar_index-3, _fvgTop, bar_index+15, _fvgBot,
                              bgcolor=color.new(#FF9800,80), border_color=color.new(#FF9800,0)))
@@ -886,6 +901,7 @@ if i_m6_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and 
                     f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
                     f_drawLabel("M6 FVG", entryP, slP, tpP, false, 1.4)
                     f_registerTrade(6, entryP, slP, tpP, false)
+                    _agreeCountBear += 1
                     if i_showBox
                         array.push(_boxes, box.new(bar_index-3, _fvgTop, bar_index+15, _fvgBot,
                              bgcolor=color.new(#FF9800,80), border_color=color.new(#FF9800,0)))
@@ -918,15 +934,19 @@ if i_m9_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and 
                 _m9InsideCount := 0  // still outside, reset counter
             // Enough bars back inside → bull failed → short at market (close)
             if _m9InsideCount >= i_m9_failBars and not pastCutoff
-                sig_m9_bear    := true
-                entryP          = ref_close
-                slP             = _or15H + slDist * 0.5
-                tpP             = entryP - (slP - entryP) * i_m9_rratio
-                f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
-                f_drawLabel("M9 FailORB", entryP, slP, tpP, false, 4.6)
-                f_registerTrade(9, entryP, slP, tpP, false)
+                // Always reset state when threshold reached — prevents stuck state on subsequent bars
                 _m9BullBreak   := false
                 _m9InsideCount := 0
+                // Only fire if VWAP and RVOL conditions are met
+                if ref_close < ref_vwap and ref_rvol >= 1.2
+                    sig_m9_bear    := true
+                    entryP          = ref_close
+                    slP             = _or15H + slDist * 0.5
+                    tpP             = entryP - (slP - entryP) * i_m9_rratio
+                    f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
+                    f_drawLabel("M9 FailORB", entryP, slP, tpP, false, 4.6)
+                    f_registerTrade(9, entryP, slP, tpP, false)
+                    _agreeCountBear += 1
 
         // Track bars returning inside OR after bear breakout
         if _m9BearBreak and not _m9BullBreak
@@ -936,15 +956,18 @@ if i_m9_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and 
                 _m9InsideCount := 0
             // Enough bars back inside → bear failed → long at market (close)
             if _m9InsideCount >= i_m9_failBars and not pastCutoff
-                sig_m9_bull    := true
-                entryP          = ref_close
-                slP             = _or15L - slDist * 0.5
-                tpP             = entryP + (entryP - slP) * i_m9_rratio
-                f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
-                f_drawLabel("M9 FailORB", entryP, slP, tpP, true, 4.6)
-                f_registerTrade(9, entryP, slP, tpP, true)
+                // Always reset state — prevents stuck state if VWAP/RVOL block the fire
                 _m9BearBreak   := false
                 _m9InsideCount := 0
+                if ref_close > ref_vwap and ref_rvol >= 1.2
+                    sig_m9_bull    := true
+                    entryP          = ref_close
+                    slP             = _or15L - slDist * 0.5
+                    tpP             = entryP + (entryP - slP) * i_m9_rratio
+                    f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
+                    f_drawLabel("M9 FailORB", entryP, slP, tpP, true, 4.6)
+                    f_registerTrade(9, entryP, slP, tpP, true)
+                    _agreeCountBull += 1
 
 // ============================================================
 // SECTION 17A-M10 — MODEL 10: BDM ORB (inline, global scope)
@@ -1007,8 +1030,8 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
 
             // Phase 2: detect retest touch (price returns to within tolerance of OR high)
             else if not _bdmBullRetest
-                retestDist = math.abs(fast_close - _bdmBullBreakLevel) / _bdmBullBreakLevel * 100.0
-                if retestDist <= i_bdm_retestTol
+                retestDist = math.abs(fast_close - _bdmBullBreakLevel)
+                if retestDist <= fast_atr14 * i_bdm_retestTol
                     _bdmBullRetest   := true
                     _bdmBullWaitBars := 0   // reset timeout — Phase 3 gets its own window
 
@@ -1021,6 +1044,7 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
                     sig_m10_bull   := true
                     _bdmFiredBull  := true
                     f_registerTrade(11, entryP10, slP10, tpP10, true)
+                    _agreeCountBull += 1
                     f_drawSLTP(entryP10, slP10, tpP10, i_colBull, i_colSL, i_colTP)
                     f_drawLabel("M10 BDM ▲", entryP10, slP10, tpP10, true, 4.6)
                     line.delete(_bdmBullRetestLine)
@@ -1054,8 +1078,8 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
 
             // Phase 2: detect retest touch
             else if not _bdmBearRetest
-                retestDistB = math.abs(fast_close - _bdmBearBreakLevel) / _bdmBearBreakLevel * 100.0
-                if retestDistB <= i_bdm_retestTol
+                retestDistB = math.abs(fast_close - _bdmBearBreakLevel)
+                if retestDistB <= fast_atr14 * i_bdm_retestTol
                     _bdmBearRetest   := true
                     _bdmBearWaitBars := 0
 
@@ -1068,6 +1092,7 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
                     sig_m10_bear   := true
                     _bdmFiredBear  := true
                     f_registerTrade(11, entryP10b, slP10b, tpP10b, false)
+                    _agreeCountBear += 1
                     f_drawSLTP(entryP10b, slP10b, tpP10b, i_colBear, i_colSL, i_colTP)
                     f_drawLabel("M10 BDM ▼", entryP10b, slP10b, tpP10b, false, 4.6)
                     line.delete(_bdmBearRetestLine)
