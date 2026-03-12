@@ -1409,22 +1409,24 @@ if i_showDashboard and i_mode == "Multi-Model"
     mIdxs  = array.from(1, 3, 4, 6, 7, 9, 11)
 
     // Actual reference TF per model (driven by i_refTF_fast / i_refTF inputs):
-    // M1 Crabel  → fast TF (i_refTF_fast, default 1m)
+    // M1 Crabel      → fast TF (i_refTF_fast, default 1m)
     // M3/M4/M6/M7/M9 → primary TF (i_refTF, default 5m)
+    // M10 BDM        → Phase 1: primary TF (5m); Phase 2/3: fast TF (1m)
     C_TF = color.new(#00BCD4, 0)  // cyan — distinct from signal colours
     mTFs = array.from(i_refTF_fast, i_refTF, i_refTF, i_refTF, i_refTF, i_refTF, i_refTF_fast + "/" + i_refTF)
 
     for i = 0 to 6
-        dSig    = array.get(_dashSignal, i)
+        _arrIdx = array.get(mIdxs, i) - 1  // model ID → backing array slot (M1→0, M3→2, ..., M10→10)
+        dSig    = array.get(_dashSignal, _arrIdx)
         isBull  = dSig == 1
         isBear  = dSig == -1
         rowBG   = isBull ? C_BULL_DIM : isBear ? C_BEAR_DIM : C_NONE
         sigStr  = isBull ? "LONG"   : isBear ? "SHORT"  : "-"
         dirStr  = isBull ? "▲ BULL" : isBear ? "▼ BEAR" : "-"
         sigClr  = isBull ? i_colBull : isBear ? i_colBear : C_TXT_DIM
-        lEntry  = array.get(_lastEntry, i)
-        lSL     = array.get(_lastSL, i)
-        lTP     = array.get(_lastTP, i)
+        lEntry  = array.get(_lastEntry, _arrIdx)
+        lSL     = array.get(_lastSL,    _arrIdx)
+        lTP     = array.get(_lastTP,    _arrIdx)
         entStr  = na(lEntry) ? "-" : str.tostring(lEntry, format.mintick)
         slStr   = na(lSL)    ? "-" : str.tostring(lSL,    format.mintick)
         tpStr   = na(lTP)    ? "-" : str.tostring(lTP,    format.mintick)
@@ -1739,11 +1741,11 @@ plotshape(sig_m9_bear and i_m9_on and i_mode=="Multi-Model",
      color=i_colBear,  size=size.small, text="M9", textcolor=color.white)
 
 // Model 10 — BDM ORB
-plotshape(series=sig_m10_bull and i_m10_on and i_mode == "Multi-Model",
-     title="M10 BDM Long",  style=shape.triangleup,   location=location.belowbar,
+plotshape(sig_m10_bull and i_m10_on and i_mode=="Multi-Model",
+     title="M10 BDM — Long",  style=shape.triangleup,   location=location.belowbar,
      color=i_colBull, size=size.small, text="M10", textcolor=color.white)
-plotshape(series=sig_m10_bear and i_m10_on and i_mode == "Multi-Model",
-     title="M10 BDM Short", style=shape.triangledown, location=location.abovebar,
+plotshape(sig_m10_bear and i_m10_on and i_mode=="Multi-Model",
+     title="M10 BDM — Short", style=shape.triangledown, location=location.abovebar,
      color=i_colBear, size=size.small, text="M10", textcolor=color.white)
 
 // Combined Mode
@@ -1768,17 +1770,19 @@ alertcondition(sig_m6_bull, title="M6 FVG ORB — LONG",              message="O
 alertcondition(sig_m6_bear, title="M6 FVG ORB — SHORT",             message="ORB M6 FVG SHORT | {{ticker}} | {{close}}")
 alertcondition(sig_m7_bull, title="M7 Gold ORB — LONG",             message="ORB M7 Gold LONG | {{ticker}} | {{close}}")
 alertcondition(sig_m7_bear, title="M7 Gold ORB — SHORT",            message="ORB M7 Gold SHORT | {{ticker}} | {{close}}")
-alertcondition(sig_m9_bull, title="M9 Failed ORB — LONG (Reversal)",message="ORB M9 FailORB LONG | {{ticker}} | {{close}}")
-alertcondition(sig_m9_bear, title="M9 Failed ORB — SHORT (Reversal)",message="ORB M9 FailORB SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m9_bull,  title="M9 Failed ORB — LONG (Reversal)", message="ORB M9 FailORB LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m9_bear,  title="M9 Failed ORB — SHORT (Reversal)",message="ORB M9 FailORB SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m10_bull, title="M10 BDM ORB — LONG",              message="ORB M10 BDM LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m10_bear, title="M10 BDM ORB — SHORT",             message="ORB M10 BDM SHORT | {{ticker}} | {{close}}")
 alertcondition(sig_comb_bull, title="Combined ORB+ — LONG",  message="ORB Combined LONG | {{ticker}} | {{close}}")
 alertcondition(sig_comb_bear, title="Combined ORB+ — SHORT", message="ORB Combined SHORT | {{ticker}} | {{close}}")
 
 // Catch-all
 alertcondition(
-     sig_m1_bull or sig_m3_bull or sig_m4_bull or sig_m6_bull or sig_m7_bull or sig_m9_bull or sig_comb_bull,
+     sig_m1_bull or sig_m3_bull or sig_m4_bull or sig_m6_bull or sig_m7_bull or sig_m9_bull or sig_m10_bull or sig_comb_bull,
      title="ANY ORB — LONG",  message="ORB Signal LONG | {{ticker}} | {{close}}")
 alertcondition(
-     sig_m1_bear or sig_m3_bear or sig_m4_bear or sig_m6_bear or sig_m7_bear or sig_m9_bear or sig_comb_bear,
+     sig_m1_bear or sig_m3_bear or sig_m4_bear or sig_m6_bear or sig_m7_bear or sig_m9_bear or sig_m10_bear or sig_comb_bear,
      title="ANY ORB — SHORT", message="ORB Signal SHORT | {{ticker}} | {{close}}")
 
 // ============================================================
@@ -1810,6 +1814,10 @@ if _refEdge or _fastEdge
         alert("ORB M9 Failed ORB Bull Reversal LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
     if sig_m9_bear
         alert("ORB M9 Failed ORB Bear Reversal SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m10_bull
+        alert("ORB M10 BDM LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m10_bear
+        alert("ORB M10 BDM SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
     if sig_comb_bull
         alert("ORB Combined LONG | " + syminfo.ticker +
              " | Entry: " + str.tostring(close, format.mintick) +
