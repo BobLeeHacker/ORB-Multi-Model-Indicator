@@ -1,0 +1,1690 @@
+// ============================================================
+// ORB Multi-Model Indicator  —  Pine Script v6
+// 6 Opening Range Breakout models + Combined confidence mode
+// New York session | Auto DST via IANA timezone
+// ============================================================
+//@version=6
+indicator("ORB Multi-Model Indicator", shorttitle="ORB-MMI", overlay=true,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ============================================================
+// SECTION 1 — INPUTS
+// ============================================================
+
+// ── Mode ────────────────────────────────────────────────────
+var string TT_MODE = "Multi-Model: each enabled model fires independently.\nCombined: single signal scored by confidence factors."
+i_mode = input.string("Multi-Model", "Indicator Mode", options=["Multi-Model", "Combined"], group="Mode", tooltip=TT_MODE)
+
+// ── Session ─────────────────────────────────────────────────
+i_sessionOpen  = input.session("0930-1600", "NY Session Window", group="Session",
+     tooltip="Full NY trading session for signal gating.")
+i_timeCutoff   = input.int(12, "Signal Cutoff Hour (EST)", minval=10, maxval=15, group="Session",
+     tooltip="No new signals after this hour (default noon).")
+i_refTF        = input.timeframe("5", "Primary Reference TF (M3/M4/M6/M7/M9)", group="Session",
+     tooltip="Reference TF for M3, M4, M6, M7, M9. CSV data: 5m optimal for these models.\nRun the indicator on any chart TF — entries, SL/TP and win rates stay identical.")
+i_refTF_fast   = input.timeframe("1", "Fast Reference TF (M1, Combined)", group="Session",
+     tooltip="Reference TF for M1 Crabel and Combined mode. CSV data: 1m optimal (60–90% WR).\nSet to '5' to match primary TF if preferred.")
+
+// ── OR Window lengths ────────────────────────────────────────
+i_crabelMins = input.int(15, "Model 1 — Crabel OR Length (min)", minval=5,  maxval=60, group="OR Windows")
+
+// ── Model Toggles ────────────────────────────────────────────
+i_m1_on = input.bool(true, "Model 1 — Classic Crabel",      group="Model Toggles")
+i_m3_on = input.bool(true, "Model 3 — 5-Min Scalper",       group="Model Toggles")
+i_m4_on = input.bool(true, "Model 4 — Standard 15-Min",     group="Model Toggles")
+i_m6_on = input.bool(false, "Model 6 — FVG ORB",             group="Model Toggles",
+     tooltip="Disabled by default — CSV backtest shows 14–75% WR with only 3–12 trades/pair (unreliable sample size).")
+i_m7_on = input.bool(true,  "Model 7 — Gold ORB",            group="Model Toggles")
+i_m9_on = input.bool(false, "Model 9 — Failed ORB Reversal", group="Model Toggles",
+     tooltip="Disabled by default — CSV backtest shows 25–67% WR (inconsistent across pairs/TFs).")
+i_m10_on = input.bool(true, "Model 10 — BDM ORB",            group="Model Toggles",
+     tooltip="Big Daddy Max's 3-phase ORB: 5-min breakout → 1-min retest → 1-min bounce entry.")
+
+// ── Model 1 (Crabel) ─────────────────────────────────────────
+i_m1_nr7    = input.bool(true,  "M1: Require NR7/NR4 compression", group="Model 1 — Crabel")
+i_m1_rratio = input.float(2.0,  "M1: Risk/Reward ratio",           group="Model 1 — Crabel", minval=1.0, step=0.5)
+
+// ── Model 3 (5-Min Scalper) ──────────────────────────────────
+i_m3_volMult = input.float(1.5, "M3: Min volume multiplier (vs avg)", group="Model 3 — 5-Min Scalper",
+     minval=1.0, step=0.1)
+i_m3_rratio  = input.float(1.5, "M3: Risk/Reward ratio", group="Model 3 — 5-Min Scalper", minval=1.0, step=0.5)
+
+// ── Model 4 (Standard 15-Min) ────────────────────────────────
+i_m4_volMult = input.float(1.2, "M4: Min volume multiplier", group="Model 4 — 15-Min", minval=1.0, step=0.1)
+i_m4_rsiMin  = input.int(40,    "M4: RSI min (longs)",       group="Model 4 — 15-Min", minval=20, maxval=60)
+i_m4_rsiMax  = input.int(60,    "M4: RSI max (shorts)",      group="Model 4 — 15-Min", minval=40, maxval=80)
+i_m4_rratio  = input.float(2.0, "M4: Risk/Reward ratio",     group="Model 4 — 15-Min", minval=1.0, step=0.5)
+
+// ── Model 6 (FVG) ────────────────────────────────────────────
+i_m6_fvgMinSize = input.float(0.1, "M6: Min FVG size (% of OR range)", group="Model 6 — FVG",
+     minval=0.05, step=0.05)
+i_m6_rratio     = input.float(2.0, "M6: Risk/Reward ratio",             group="Model 6 — FVG",
+     minval=1.0, step=0.5)
+
+// ── Model 7 (Gold ORB) ───────────────────────────────────────
+i_m7_cutoffHour = input.int(12,   "M7: Cutoff hour EST (no entries after)", group="Model 7 — Gold ORB",
+     minval=10, maxval=15)
+i_m7_rratio     = input.float(2.0, "M7: Risk/Reward ratio", group="Model 7 — Gold ORB", minval=1.0, step=0.5)
+
+// ── Model 9 (Failed ORB) ─────────────────────────────────────
+i_m9_rratio   = input.float(2.0, "M9: Risk/Reward ratio",              group="Model 9 — Failed ORB",
+     minval=1.0, step=0.5)
+i_m9_failBars = input.int(5,     "M9: Bars inside to confirm failure",  group="Model 9 — Failed ORB",
+     minval=2, maxval=10)
+
+// ── Model 10 (BDM ORB) ───────────────────────────────────────
+i_bdm_retestTol = input.float(0.05, "BDM: Retest tolerance (% of price)", group="Model 10 — BDM ORB",
+     minval=0.01, maxval=1.0, step=0.01,
+     tooltip="How close 1-min close must come to OR level to count as a retest.\n0.05% = $2.50 on a $5,000 asset. Adjust upward for low-priced instruments.")
+i_bdm_slMult    = input.float(0.5,  "BDM: SL ATR multiplier",            group="Model 10 — BDM ORB",
+     minval=0.25, maxval=3.0, step=0.25,
+     tooltip="SL = OR break level ± (ATR × multiplier). Anchored at OR level, not entry close.")
+i_bdm_rratio    = input.float(2.0,  "BDM: Risk/Reward ratio",            group="Model 10 — BDM ORB",
+     minval=1.0, maxval=5.0, step=0.5)
+i_bdm_maxWait   = input.int(20,     "BDM: Max 1-min bars to wait",       group="Model 10 — BDM ORB",
+     minval=5, maxval=50,
+     tooltip="Max 1-min bars to wait for retest (Phase 2) or bounce (Phase 3). Resets at Phase 2 confirmation.")
+
+// ── Combined Mode weights ─────────────────────────────────────
+i_wVol    = input.int(20, "Weight: Volume Confirmation (%)",  group="Combined Weights", minval=0, maxval=100)
+i_wHTF    = input.int(20, "Weight: HTF Trend Alignment (%)",  group="Combined Weights", minval=0, maxval=100)
+i_wDay    = input.int(15, "Weight: Day Type / Gap (%)",       group="Combined Weights", minval=0, maxval=100)
+i_wNR     = input.int(10, "Weight: Narrow Range NR7 (%)",     group="Combined Weights", minval=0, maxval=100)
+i_wATR    = input.int(10, "Weight: ATR Volatility (%)",       group="Combined Weights", minval=0, maxval=100)
+i_wClose  = input.int(10, "Weight: Candle Close Quality (%)", group="Combined Weights", minval=0, maxval=100)
+i_wVWAP   = input.int(10, "Weight: VWAP Alignment (%)",       group="Combined Weights", minval=0, maxval=100)
+i_wFlow   = input.int(5,  "Weight: Order Flow Proxy (%)",     group="Combined Weights", minval=0, maxval=100)
+i_minScore = input.int(60, "Min Confidence Score to Signal (%)", group="Combined Weights",
+     minval=40, maxval=95)
+
+// ── HTF Selection ─────────────────────────────────────────────
+i_htfTF = input.timeframe("60", "HTF Timeframe for Trend", group="HTF Settings",
+     tooltip="Used for trend alignment in Combined mode and Model 4.")
+
+// ── Visuals ───────────────────────────────────────────────────
+i_showBox       = input.bool(true, "Show OR Range Box",     group="Visuals")
+i_showMidLine   = input.bool(true, "Show OR Midline",       group="Visuals")
+i_showSLTP      = input.bool(true, "Show SL/TP Lines",      group="Visuals")
+i_showLabels    = input.bool(true, "Show Signal Labels",    group="Visuals")
+i_showDashboard = input.bool(true, "Show Dashboard Table",  group="Visuals")
+i_dashPos       = input.string("Top Right", "Dashboard Position",
+     options=["Top Right","Top Left","Bottom Right","Bottom Left"], group="Visuals")
+i_showTradeTable = input.bool(true,            "Show Entries Table",         group="Visuals")
+i_showBestModel  = input.bool(true,            "Show Best Model Table",      group="Visuals")
+i_tradeTablePos  = input.string("Bottom Right","Entries Table Position",
+     options=["Top Right","Top Left","Bottom Right","Bottom Left"], group="Visuals")
+i_bestModelPos   = input.string("Bottom Left", "Best Model Table Position",
+     options=["Top Right","Top Left","Bottom Right","Bottom Left"], group="Visuals")
+i_maxTrades      = input.int(50, "Max Trades in Memory", group="Visuals", minval=20, maxval=200)
+
+i_colBull   = input.color(color.new(#00E676, 0),  "Bull Signal Color", group="Visuals")
+i_colBear   = input.color(color.new(#FF1744, 0),  "Bear Signal Color", group="Visuals")
+i_colOR     = input.color(color.new(#2196F3, 75), "OR Box Fill",       group="Visuals")
+i_colORLine = input.color(color.new(#2196F3, 0),  "OR Line Color",     group="Visuals")
+i_colSL     = input.color(color.new(#FF5252, 0),  "SL Line Color",     group="Visuals")
+i_colTP     = input.color(color.new(#69F0AE, 0),  "TP Line Color",     group="Visuals")
+
+// ── Risk ──────────────────────────────────────────────────────
+i_atrLen    = input.int(14,   "ATR Length",             group="Risk", minval=5, maxval=50)
+i_atrMult   = input.float(1.0,"ATR SL Multiplier",      group="Risk", minval=0.5, maxval=5.0, step=0.25,
+     tooltip="SL = ATR * multiplier from OR edge.")
+i_volAvgLen = input.int(20,   "Volume Average Length",  group="Risk", minval=5, maxval=50)
+
+// ============================================================
+// SECTION 2 — CONSTANTS
+// ============================================================
+
+string NY_TZ         = "America/New_York"
+string OR_5MIN_STR   = "0930-0935"
+string OR_15MIN_STR  = "0930-0945"
+
+// ── Dynamic OR end-time string helper ────────────────────────
+// Converts 9:30 + durationMins to "HHMM" string (handles hour roll-over)
+f_orEndTime(durationMins) =>
+    totalMins = 9 * 60 + 30 + durationMins
+    endH = int(totalMins / 60)      // int() truncates float division → integer hours
+    endM = totalMins - endH * 60    // remainder = minutes
+    hStr = endH < 10 ? "0" + str.tostring(endH) : str.tostring(endH)
+    mStr = endM < 10 ? "0" + str.tostring(endM) : str.tostring(endM)
+    "0930-" + hStr + mStr
+
+crabelSessionStr = f_orEndTime(i_crabelMins)
+
+// ============================================================
+// SECTION 3 — GLOBAL STATE (var)
+// ============================================================
+
+// Day tracking
+var int  _lastDay = 0
+var bool _newDay  = false
+
+// 5-min OR
+var float _or5H          = na
+var float _or5L          = na
+var bool  _or5Complete   = false
+
+// 15-min OR
+var float _or15H         = na
+var float _or15L         = na
+var bool  _or15Complete  = false
+
+// Crabel OR (user-length)
+var float _orCrabelH         = na
+var float _orCrabelL         = na
+var bool  _orCrabelComplete  = false
+
+// FVG state
+var float _fvgTop        = na
+var float _fvgBot        = na
+var bool  _fvgBull       = false
+var bool  _fvgBear       = false
+var bool  _fvgTriggered  = false
+var int   _fvgFormedBar  = -1  // bar_index when FVG was detected; gate signal to next bar only
+
+// Model 9 — failed ORB state
+var bool _m9BullBreak   = false
+var bool _m9BearBreak   = false
+var int  _m9BreakBar    = 0
+var int  _m9InsideCount = 0
+
+// Previous day OHLC
+var float _pdHigh  = na
+var float _pdLow   = na
+var float _pdClose = na
+
+// Daily ranges for NR7 (rolling 7)
+var float[] _dailyRanges = array.new<float>()
+
+// Visual object arrays (for cleanup)
+var box[]   _boxes  = array.new<box>()
+var line[]  _lines  = array.new<line>()
+var label[] _labels = array.new<label>()
+
+// OR box drawn flag (per day)
+var bool _or15BoxDrawn = false
+
+// Active OR visual objects — extended each bar, automatically freeze at day end
+var line _orHLineActive   = na
+var line _orLLineActive   = na
+var line _orMidLineActive = na
+var box  _orBoxActive     = na
+
+// Per-day fired flags — belt-and-suspenders: prevent same model firing twice per day per direction
+// Reset in _newDay block; read (not written) inside model functions; set true at caller side
+var bool _m1FiredBull = false
+var bool _m1FiredBear = false
+var bool _m3FiredBull = false
+var bool _m3FiredBear = false
+var bool _m4FiredBull = false
+var bool _m4FiredBear = false
+var bool _m7FiredBull = false
+var bool _m7FiredBear = false
+
+// M10 BDM ORB — Phase state (bull)
+var bool  _bdmBullBreak      = false   // Phase 1 confirmed
+var bool  _bdmBullRetest     = false   // Phase 2 retest touched
+var bool  _bdmFiredBull      = false   // one-signal-per-day guard
+var float _bdmBullBreakLevel = na      // OR level broken (Phase 1)
+var int   _bdmBullWaitBars   = 0       // fastEdge count since phase start
+var line  _bdmBullRetestLine = na      // visual retest zone line
+
+// M10 BDM ORB — Phase state (bear)
+var bool  _bdmBearBreak      = false
+var bool  _bdmBearRetest     = false
+var bool  _bdmFiredBear      = false
+var float _bdmBearBreakLevel = na
+var int   _bdmBearWaitBars   = 0
+var line  _bdmBearRetestLine = na
+
+// Signal flags — reset each bar, read by plotshape + alertcondition
+var bool sig_m1_bull   = false
+var bool sig_m1_bear   = false
+var bool sig_m3_bull   = false
+var bool sig_m3_bear   = false
+var bool sig_m4_bull   = false
+var bool sig_m4_bear   = false
+var bool sig_m6_bull   = false
+var bool sig_m6_bear   = false
+var bool sig_m7_bull   = false
+var bool sig_m7_bear   = false
+var bool sig_m9_bull   = false
+var bool sig_m9_bear   = false
+var bool sig_m10_bull  = false
+var bool sig_m10_bear  = false
+var bool sig_comb_bull = false
+var bool sig_comb_bear = false
+
+// Combined mode output
+var float  _confScore = 0.0
+var string _confGrade = "F"
+var bool   _confBull  = false
+
+// Dashboard tables
+var table _dashTable  = na
+var table _checkTable = na
+
+// ── Trade Tracking Arrays ─────────────────────────────────────
+var float[] _trEntry  = array.new<float>()   // entry price
+var float[] _trSL     = array.new<float>()   // stop-loss price
+var float[] _trTP     = array.new<float>()   // take-profit price
+var int[]   _trModel  = array.new<int>()     // 1-9, 10=combined
+var int[]   _trDir    = array.new<int>()     // 1=bull, -1=bear
+var int[]   _trStatus = array.new<int>()     // 0=active, 1=TP hit, -1=SL hit
+var int[]   _trBar    = array.new<int>()     // bar_index at entry
+var int[]   _trDay    = array.new<int>()     // YYYYMMDD day ID
+
+// Per-model last signal (size 11: index 0-8 = M1-M9, index 9 = Combined, index 10 = M10)
+var float[] _lastEntry  = array.new<float>(11, na)
+var float[] _lastSL     = array.new<float>(11, na)
+var float[] _lastTP     = array.new<float>(11, na)
+var int[]   _lastDir    = array.new<int>(11, 0)
+
+// Dashboard persistent signal state — reset on new day (0=none, 1=bull, -1=bear)
+var int[]   _dashSignal = array.new<int>(11, 0)
+
+// Per-model win/loss counters (index 0-8 = M1-M9, 9 = Combined, 10 = M10)
+// These accumulate permanently — never trimmed, never cross-contaminated by other models
+var int[]   _mWins   = array.new<int>(11, 0)
+var int[]   _mLosses = array.new<int>(11, 0)
+
+// Day bias
+var string  _dayBias   = "NEUTRAL"
+var float   _biasScore = 0.0
+
+// Day Bias chart label (persistent, moves to latest bar each tick)
+var label   _biasChartLabel = na
+
+// Combined mode pending setup labels (live limit-order preview)
+var label   _combPendLong   = na
+var label   _combPendShort  = na
+var bool    _combLongFired  = false
+var bool    _combShortFired = false
+
+// Entries + Best Model tables
+var table   _tradeTable = na
+var table   _bestTable  = na
+
+// ============================================================
+// SECTION 4 — TECHNICAL INDICATORS (global scope)
+// ============================================================
+
+atr14  = ta.atr(i_atrLen)
+volAvg = ta.sma(volume, i_volAvgLen)
+rvol   = volume / volAvg
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+rsi14  = ta.rsi(close, 14)
+vwapVal = ta.vwap(hlc3)
+
+// HTF data — must be at global scope
+htfClose = request.security(syminfo.tickerid, i_htfTF, close,           lookahead=barmerge.lookahead_off)
+htfEma20 = request.security(syminfo.tickerid, i_htfTF, ta.ema(close,20), lookahead=barmerge.lookahead_off)
+htfEma50 = request.security(syminfo.tickerid, i_htfTF, ta.ema(close,50), lookahead=barmerge.lookahead_off)
+
+// Daily data
+dailyATR = request.security(syminfo.tickerid, "D", ta.atr(10),   lookahead=barmerge.lookahead_off)
+dHigh    = request.security(syminfo.tickerid, "D", high,          lookahead=barmerge.lookahead_off)
+dLow     = request.security(syminfo.tickerid, "D", low,           lookahead=barmerge.lookahead_off)
+dOpen    = request.security(syminfo.tickerid, "D", open,          lookahead=barmerge.lookahead_off)
+pdHigh   = request.security(syminfo.tickerid, "D", high[1],       lookahead=barmerge.lookahead_off)
+pdLow    = request.security(syminfo.tickerid, "D", low[1],        lookahead=barmerge.lookahead_off)
+
+// ── Reference TF data — signals, ATR, and confirmations all use these ────────
+// On any chart TF, a signal fires exactly once per i_refTF bar close.
+// close[1] inside request.security refers to the previous REFERENCE TF bar.
+ref_close     = request.security(syminfo.tickerid, i_refTF, close,                                    lookahead=barmerge.lookahead_off)
+ref_close1    = request.security(syminfo.tickerid, i_refTF, close[1],                                 lookahead=barmerge.lookahead_off)
+ref_high      = request.security(syminfo.tickerid, i_refTF, high,                                     lookahead=barmerge.lookahead_off)
+ref_low       = request.security(syminfo.tickerid, i_refTF, low,                                      lookahead=barmerge.lookahead_off)
+ref_atr14     = request.security(syminfo.tickerid, i_refTF, ta.atr(i_atrLen),                         lookahead=barmerge.lookahead_off)
+ref_rsi14     = request.security(syminfo.tickerid, i_refTF, ta.rsi(close, 14),                        lookahead=barmerge.lookahead_off)
+ref_vwap      = request.security(syminfo.tickerid, i_refTF, ta.vwap(hlc3),                            lookahead=barmerge.lookahead_off)
+ref_rvol      = request.security(syminfo.tickerid, i_refTF, volume / ta.sma(volume, i_volAvgLen),     lookahead=barmerge.lookahead_off)
+ref_bearBar   = request.security(syminfo.tickerid, i_refTF, close < open,                             lookahead=barmerge.lookahead_off)
+ref_bullBar   = request.security(syminfo.tickerid, i_refTF, close > open,                             lookahead=barmerge.lookahead_off)
+ref_time      = request.security(syminfo.tickerid, i_refTF, time,                                     lookahead=barmerge.lookahead_off)
+pdClose  = request.security(syminfo.tickerid, "D", close[1],      lookahead=barmerge.lookahead_off)
+
+// New ref-TF bar detected: fires on the FIRST chart bar of each new ref-TF period.
+// At this moment ref_close = confirmed close of the bar that just completed (lookahead_off).
+// Works correctly on ALL historical bars (unlike barstate.isconfirmed which is always true historically).
+_refEdge = ref_time != ref_time[1]
+
+// ── Fast Reference TF data (M1 Crabel + Combined mode) ───────────────────────
+// Separate request.security block on i_refTF_fast (default "1").
+// RSI omitted — only M4 uses RSI and it stays on primary TF.
+fast_close     = request.security(syminfo.tickerid, i_refTF_fast, close,                                lookahead=barmerge.lookahead_off)
+fast_close1    = request.security(syminfo.tickerid, i_refTF_fast, close[1],                             lookahead=barmerge.lookahead_off)
+fast_high      = request.security(syminfo.tickerid, i_refTF_fast, high,                                 lookahead=barmerge.lookahead_off)
+fast_low       = request.security(syminfo.tickerid, i_refTF_fast, low,                                  lookahead=barmerge.lookahead_off)
+fast_atr14     = request.security(syminfo.tickerid, i_refTF_fast, ta.atr(i_atrLen),                     lookahead=barmerge.lookahead_off)
+fast_vwap      = request.security(syminfo.tickerid, i_refTF_fast, ta.vwap(hlc3),                        lookahead=barmerge.lookahead_off)
+fast_rvol      = request.security(syminfo.tickerid, i_refTF_fast, volume / ta.sma(volume, i_volAvgLen), lookahead=barmerge.lookahead_off)
+fast_bullBar   = request.security(syminfo.tickerid, i_refTF_fast, close > open,                         lookahead=barmerge.lookahead_off)
+fast_bearBar   = request.security(syminfo.tickerid, i_refTF_fast, close < open,                         lookahead=barmerge.lookahead_off)
+fast_time      = request.security(syminfo.tickerid, i_refTF_fast, time,                                 lookahead=barmerge.lookahead_off)
+
+_fastEdge = fast_time != fast_time[1]
+
+// ============================================================
+// SECTION 5 — SESSION HELPERS
+// ============================================================
+
+f_inSession(sess) =>
+    not na(time(timeframe.period, sess, NY_TZ))
+
+inNYSession = f_inSession(i_sessionOpen)
+nyHour      = hour(time, NY_TZ)
+pastCutoff  = nyHour >= i_timeCutoff
+
+in5MinOR   = f_inSession(OR_5MIN_STR)
+in15MinOR  = f_inSession(OR_15MIN_STR)
+inCrabelOR = f_inSession(crabelSessionStr)
+
+// ============================================================
+// SECTION 6 — DAY DETECTION & DAILY RESET
+// ============================================================
+
+// Unique day ID: YYYYMMDD using NY timezone
+currentDay = year(time, NY_TZ) * 10000 + month(time, NY_TZ) * 100 + dayofmonth(time, NY_TZ)
+_newDay   := currentDay != _lastDay
+
+if _newDay
+    _lastDay := currentDay
+
+    // Snapshot previous day OHLC
+    _pdHigh  := pdHigh
+    _pdLow   := pdLow
+    _pdClose := pdClose
+
+    // Rolling 7-day ranges for NR7
+    todayRange = dHigh - dLow
+    if not na(todayRange) and todayRange > 0
+        array.push(_dailyRanges, todayRange)
+        if array.size(_dailyRanges) > 7
+            array.shift(_dailyRanges)
+
+    // Reset all OR tracking
+    _or5H             := na
+    _or5L             := na
+    _or5Complete      := false
+    _or15H            := na
+    _or15L            := na
+    _or15Complete     := false
+    _orCrabelH        := na
+    _orCrabelL        := na
+    _orCrabelComplete := false
+
+    // Reset FVG state
+    _fvgTop        := na
+    _fvgBot        := na
+    _fvgBull       := false
+    _fvgBear       := false
+    _fvgTriggered  := false
+    _fvgFormedBar  := -1
+
+    // Reset model state
+    _m9BullBreak  := false
+    _m9BearBreak  := false
+    _m9BreakBar   := 0
+    _m9InsideCount := 0
+
+    // Reset OR box drawn flag
+    _or15BoxDrawn := false
+
+    // Reset persistent dashboard signal state for new day
+    for _ri = 0 to 10
+        array.set(_dashSignal, _ri, 0)
+
+    // Reset per-day fired flags
+    _m1FiredBull := false
+    _m1FiredBear := false
+    _m3FiredBull := false
+    _m3FiredBear := false
+    _m4FiredBull := false
+    _m4FiredBear := false
+    _m7FiredBull := false
+    _m7FiredBear := false
+    // M10 BDM ORB reset
+    _bdmBullBreak      := false  ;  _bdmBullRetest  := false  ;  _bdmFiredBull := false
+    _bdmBullBreakLevel := na     ;  _bdmBullWaitBars := 0
+    line.delete(_bdmBullRetestLine)  ;  _bdmBullRetestLine := na
+    _bdmBearBreak      := false  ;  _bdmBearRetest  := false  ;  _bdmFiredBear := false
+    _bdmBearBreakLevel := na     ;  _bdmBearWaitBars := 0
+    line.delete(_bdmBearRetestLine)  ;  _bdmBearRetestLine := na
+
+    // Reset Combined pending state
+    _combLongFired  := false
+    _combShortFired := false
+    if not na(_combPendLong)
+        label.delete(_combPendLong)
+        _combPendLong := na
+    if not na(_combPendShort)
+        label.delete(_combPendShort)
+        _combPendShort := na
+
+// Reset all signal flags each bar
+sig_m1_bull   := false
+sig_m1_bear   := false
+sig_m3_bull   := false
+sig_m3_bear   := false
+sig_m4_bull   := false
+sig_m4_bear   := false
+sig_m6_bull   := false
+sig_m6_bear   := false
+sig_m7_bull   := false
+sig_m7_bear   := false
+sig_m9_bull   := false
+sig_m9_bear   := false
+sig_m10_bull  := false
+sig_m10_bear  := false
+sig_comb_bull := false
+sig_comb_bear := false
+
+// ============================================================
+// SECTION 7 — OR RANGE TRACKING
+// ============================================================
+
+// 5-min OR
+if in5MinOR
+    _or5H := na(_or5H) ? high : math.max(_or5H, high)
+    _or5L := na(_or5L) ? low  : math.min(_or5L, low)
+else if not _or5Complete and not na(_or5H)
+    _or5Complete := true
+
+// 15-min OR
+if in15MinOR
+    _or15H := na(_or15H) ? high : math.max(_or15H, high)
+    _or15L := na(_or15L) ? low  : math.min(_or15L, low)
+else if not _or15Complete and not na(_or15H)
+    _or15Complete := true
+
+// Crabel OR (user-configurable)
+if inCrabelOR
+    _orCrabelH := na(_orCrabelH) ? high : math.max(_orCrabelH, high)
+    _orCrabelL := na(_orCrabelL) ? low  : math.min(_orCrabelL, low)
+else if not _orCrabelComplete and not na(_orCrabelH)
+    _orCrabelComplete := true
+
+// ============================================================
+// SECTION 8 — FVG DETECTION (inline, after 15-min OR completes)
+// ============================================================
+
+// Bullish FVG: bar[2].high < bar[0].low — a gap up; zone = [high[2], low]
+// Bearish FVG: bar[2].low > bar[0].high — a gap down; zone = [high, low[2]]
+if _or15Complete and not _fvgTriggered and inNYSession
+    if high[2] < low and not _fvgBull
+        _fvgTop       := low
+        _fvgBot       := high[2]
+        _fvgBull      := true
+        _fvgBear      := false
+        _fvgFormedBar := bar_index   // record formation bar so signal is blocked this bar
+    if low[2] > high and not _fvgBear
+        _fvgTop       := low[2]
+        _fvgBot       := high
+        _fvgBull      := false
+        _fvgBear      := true
+        _fvgFormedBar := bar_index
+
+// ============================================================
+// SECTION 9 — NR7 / NR4 DETECTION (functions)
+// ============================================================
+
+// NR7: today's range narrowest of last 7 days
+f_isNR7() =>
+    sz = array.size(_dailyRanges)
+    if sz < 2
+        false
+    else
+        todayR = dHigh - dLow
+        result = true
+        for i = 0 to math.min(sz, 7) - 1
+            if todayR > array.get(_dailyRanges, sz - 1 - i)
+                result := false
+        result
+
+f_isNR4() =>
+    sz = array.size(_dailyRanges)
+    if sz < 2
+        false
+    else
+        todayR = dHigh - dLow
+        result = true
+        for i = 0 to math.min(sz, 4) - 1
+            if todayR > array.get(_dailyRanges, sz - 1 - i)
+                result := false
+        result
+
+isNR7 = f_isNR7()
+isNR4 = f_isNR4()
+
+// ============================================================
+// SECTION 10 — DRAWING HELPERS (functions)
+// These only push to global arrays — allowed from UDFs
+// ============================================================
+
+f_drawSLTP(entryP, slP, tpP, clrEntry, clrSL, clrTP) =>
+    if i_showSLTP
+        array.push(_lines, line.new(bar_index, entryP, bar_index+20, entryP, color=clrEntry, style=line.style_dashed, width=1))
+        array.push(_lines, line.new(bar_index, slP,    bar_index+20, slP,    color=clrSL,    style=line.style_dashed, width=1))
+        array.push(_lines, line.new(bar_index, tpP,    bar_index+20, tpP,    color=clrTP,    style=line.style_dashed, width=1))
+
+// yMult controls vertical offset so labels from different models don't overlap on the same bar
+f_drawLabel(modelName, entryP, slP, tpP, isBull, yMult = 0.6) =>
+    if i_showLabels
+        yOff = isBull ? low - atr14 * yMult : high + atr14 * yMult
+        array.push(_labels, label.new(bar_index, yOff,
+             text      = modelName +
+                         "\nEntry: " + str.tostring(entryP, format.mintick) +
+                         "\nSL: "    + str.tostring(slP,    format.mintick) +
+                         "\nTP: "    + str.tostring(tpP,    format.mintick),
+             color     = isBull ? i_colBull : i_colBear,
+             style     = isBull ? label.style_label_up : label.style_label_down,
+             textcolor = color.white,
+             size      = size.small))
+
+// Register a new trade: push to tracking arrays + update per-model last-signal state
+// modelIdx: 1-9 for M1-M9, 10 for Combined (array index = modelIdx - 1)
+f_registerTrade(modelIdx, entryP, slP, tpP, isBull) =>
+    arrIdx = modelIdx - 1
+    array.push(_trEntry,  entryP)
+    array.push(_trSL,     slP)
+    array.push(_trTP,     tpP)
+    array.push(_trModel,  modelIdx)
+    array.push(_trDir,    isBull ? 1 : -1)
+    array.push(_trStatus, 0)
+    array.push(_trBar,    bar_index)
+    array.push(_trDay,    year(time, NY_TZ) * 10000 + month(time, NY_TZ) * 100 + dayofmonth(time, NY_TZ))
+    array.set(_lastEntry,  arrIdx, entryP)
+    array.set(_lastSL,     arrIdx, slP)
+    array.set(_lastTP,     arrIdx, tpP)
+    array.set(_lastDir,    arrIdx, isBull ? 1 : -1)
+    array.set(_dashSignal, arrIdx, isBull ? 1 : -1)
+
+// ============================================================
+// SECTION 11 — OR BOX DRAWING
+// ============================================================
+
+// Draw once per day on first bar after 15-min OR completes
+// Lines are created with x2 = bar_index; the extension block below advances x2 each bar
+// and stops when _or15Complete resets on a new day — so lines never bleed into the next day
+if _or15Complete and not _or15BoxDrawn and not na(_or15H) and not na(_or15L)
+    _or15BoxDrawn := true
+    orMid = (_or15H + _or15L) / 2.0
+
+    if i_showBox
+        _orBoxActive := box.new(bar_index, _or15H, bar_index, _or15L,
+             bgcolor=i_colOR, border_color=i_colORLine, border_width=1)
+        array.push(_boxes, _orBoxActive)
+    else
+        _orBoxActive := na
+
+    _orHLineActive := line.new(bar_index, _or15H, bar_index, _or15H,
+         color=i_colORLine, style=line.style_dashed, width=1)
+    _orLLineActive := line.new(bar_index, _or15L, bar_index, _or15L,
+         color=i_colORLine, style=line.style_dashed, width=1)
+    array.push(_lines, _orHLineActive)
+    array.push(_lines, _orLLineActive)
+
+    if i_showMidLine
+        _orMidLineActive := line.new(bar_index, orMid, bar_index, orMid,
+             color=color.new(i_colORLine, 50), style=line.style_dotted, width=1)
+        array.push(_lines, _orMidLineActive)
+    else
+        _orMidLineActive := na
+
+    // OR level labels
+    array.push(_labels, label.new(bar_index, _or15H,
+         text="OR H: "+str.tostring(_or15H, format.mintick),
+         color=i_colORLine, style=label.style_label_left, textcolor=color.white, size=size.tiny))
+    array.push(_labels, label.new(bar_index, _or15L,
+         text="OR L: "+str.tostring(_or15L, format.mintick),
+         color=i_colORLine, style=label.style_label_left, textcolor=color.white, size=size.tiny))
+
+// Extend active OR lines to the current bar every bar they're alive
+// When _or15Complete resets on a new day, this block doesn't run → lines freeze at day's last bar
+if _or15Complete and not na(_orHLineActive)
+    line.set_x2(_orHLineActive, bar_index)
+    line.set_x2(_orLLineActive, bar_index)
+    if not na(_orMidLineActive)
+        line.set_x2(_orMidLineActive, bar_index)
+    if not na(_orBoxActive)
+        box.set_right(_orBoxActive, bar_index)
+
+// ============================================================
+// SECTION 12 — MODEL FUNCTIONS (stateless: M1, M3, M4, M7)
+// These only read global state and push to arrays — no scalar writes
+// ============================================================
+
+// ── Model 1: Classic Crabel ───────────────────────────────────
+// Uses fast TF data (_rc/_rc1/_ratr/_edge) — defaults 1m per CSV backtest (60–67% WR)
+f_model1(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge) =>
+    bull = false
+    bear = false
+    if _orCrabelComplete and not na(_orCrabelH) and not na(_orCrabelL)
+        if _edge and not pastCutoff and inNYSession
+            nrPass = i_m1_nr7 ? (isNR7 or isNR4) : true
+            if nrPass
+                slDist = _ratr * i_atrMult
+                // Bull breakout: entryP = OR breakout level (buy-stop price, TF-consistent).
+                // close > _orCrabelH confirms breakout; SL/TP are anchored to the OR level.
+                if _rc > _orCrabelH and _rc1 <= _orCrabelH and not _firedBull
+                    bull   := true
+                    entryP  = _orCrabelH
+                    slP     = entryP - slDist
+                    tpP     = entryP + slDist * i_m1_rratio
+                    f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
+                    f_drawLabel("M1 Crabel", entryP, slP, tpP, true, 0.6)
+                    f_registerTrade(1, entryP, slP, tpP, true)
+                // Bear breakdown
+                if _rc < _orCrabelL and _rc1 >= _orCrabelL and not _firedBear
+                    bear   := true
+                    entryP  = _orCrabelL
+                    slP     = entryP + slDist
+                    tpP     = entryP - slDist * i_m1_rratio
+                    f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
+                    f_drawLabel("M1 Crabel", entryP, slP, tpP, false, 0.6)
+                    f_registerTrade(1, entryP, slP, tpP, false)
+    [bull, bear]
+
+// ── Model 3: 5-Min Scalper ────────────────────────────────────
+// Uses primary TF data — defaults 5m per CSV backtest (71–85% WR)
+f_model3(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap) =>
+    bull = false
+    bear = false
+    if _or5Complete and not na(_or5H) and not na(_or5L)
+        if _edge and not pastCutoff and inNYSession
+            volOk  = _rvol >= i_m3_volMult
+            slDist = _ratr * i_atrMult
+            if _rc > _or5H and _rc1 <= _or5H and volOk and _rc > _rvwap and not _firedBull
+                bull   := true
+                entryP  = _or5H
+                slP     = entryP - slDist
+                tpP     = entryP + slDist * i_m3_rratio
+                f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
+                f_drawLabel("M3 5min", entryP, slP, tpP, true, 2.2)
+                f_registerTrade(3, entryP, slP, tpP, true)
+            if _rc < _or5L and _rc1 >= _or5L and volOk and _rc < _rvwap and not _firedBear
+                bear   := true
+                entryP  = _or5L
+                slP     = entryP + slDist
+                tpP     = entryP - slDist * i_m3_rratio
+                f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
+                f_drawLabel("M3 5min", entryP, slP, tpP, false, 2.2)
+                f_registerTrade(3, entryP, slP, tpP, false)
+    [bull, bear]
+
+// ── Model 4: Standard 15-Min ──────────────────────────────────
+// Uses primary TF data — RSI also from primary TF
+f_model4(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap, _rrsi) =>
+    bull = false
+    bear = false
+    if _or15Complete and not na(_or15H) and not na(_or15L)
+        if _edge and not pastCutoff and inNYSession
+            volOk   = _rvol >= i_m4_volMult
+            htfBull = htfClose > htfEma20 and htfEma20 > htfEma50
+            htfBear = htfClose < htfEma20 and htfEma20 < htfEma50
+            slDist  = _ratr * i_atrMult
+            if _rc > _or15H and _rc1 <= _or15H and not _firedBull
+                if volOk and _rc > _rvwap and _rrsi >= i_m4_rsiMin and _rrsi <= 70 and htfBull
+                    bull   := true
+                    entryP  = _or15H
+                    slP     = entryP - slDist
+                    tpP     = entryP + slDist * i_m4_rratio
+                    f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
+                    f_drawLabel("M4 15min", entryP, slP, tpP, true, 3.0)
+                    f_registerTrade(4, entryP, slP, tpP, true)
+            if _rc < _or15L and _rc1 >= _or15L and not _firedBear
+                if volOk and _rc < _rvwap and _rrsi <= i_m4_rsiMax and _rrsi >= 30 and htfBear
+                    bear   := true
+                    entryP  = _or15L
+                    slP     = entryP + slDist
+                    tpP     = entryP - slDist * i_m4_rratio
+                    f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
+                    f_drawLabel("M4 15min", entryP, slP, tpP, false, 3.0)
+                    f_registerTrade(4, entryP, slP, tpP, false)
+    [bull, bear]
+
+// ── Model 7: Gold ORB ─────────────────────────────────────────
+// Uses primary TF data — 5m per CSV backtest (46–48% WR; marginal but included)
+f_model7(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge) =>
+    bull = false
+    bear = false
+    if _or15Complete and not na(_or15H) and not na(_or15L)
+        if _edge and nyHour < i_m7_cutoffHour and inNYSession
+            slDist = _ratr * i_atrMult
+            if _rc > _or15H and _rc1 <= _or15H and not _firedBull
+                bull   := true
+                entryP  = _or15H
+                slP     = entryP - slDist
+                tpP     = entryP + slDist * i_m7_rratio
+                f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
+                f_drawLabel("M7 Gold", entryP, slP, tpP, true, 2.2)
+                f_registerTrade(7, entryP, slP, tpP, true)
+            if _rc < _or15L and _rc1 >= _or15L and not _firedBear
+                bear   := true
+                entryP  = _or15L
+                slP     = entryP + slDist
+                tpP     = entryP - slDist * i_m7_rratio
+                f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
+                f_drawLabel("M7 Gold", entryP, slP, tpP, false, 2.2)
+                f_registerTrade(7, entryP, slP, tpP, false)
+    [bull, bear]
+
+// ============================================================
+// SECTION 13 — RUN STATELESS MODELS (Multi-Model mode)
+// ============================================================
+
+if i_mode == "Multi-Model"
+    if i_m1_on
+        // M1 uses fast TF (default 1m) — best per CSV backtest
+        [b, s] = f_model1(_m1FiredBull, _m1FiredBear, fast_close, fast_close1, fast_atr14, _fastEdge)
+        sig_m1_bull := b
+        sig_m1_bear := s
+        if b
+            _m1FiredBull := true
+        if s
+            _m1FiredBear := true
+    if i_m3_on
+        // M3 uses primary TF (default 5m) — best per CSV backtest
+        [b, s] = f_model3(_m3FiredBull, _m3FiredBear, ref_close, ref_close1, ref_atr14, _refEdge, ref_rvol, ref_vwap)
+        sig_m3_bull := b
+        sig_m3_bear := s
+        if b
+            _m3FiredBull := true
+        if s
+            _m3FiredBear := true
+    if i_m4_on
+        // M4 uses primary TF (default 5m)
+        [b, s] = f_model4(_m4FiredBull, _m4FiredBear, ref_close, ref_close1, ref_atr14, _refEdge, ref_rvol, ref_vwap, ref_rsi14)
+        sig_m4_bull := b
+        sig_m4_bear := s
+        if b
+            _m4FiredBull := true
+        if s
+            _m4FiredBear := true
+    if i_m7_on
+        // M7 uses primary TF (default 5m)
+        [b, s] = f_model7(_m7FiredBull, _m7FiredBear, ref_close, ref_close1, ref_atr14, _refEdge)
+        sig_m7_bull := b
+        sig_m7_bear := s
+        if b
+            _m7FiredBull := true
+        if s
+            _m7FiredBear := true
+
+// ============================================================
+// SECTION 15 — MODEL 6: FVG ORB (INLINE — stateful)
+// ============================================================
+
+if i_m6_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and not na(_or15L)
+    if _refEdge and not pastCutoff and inNYSession and not _fvgTriggered
+        orRange  = _or15H - _or15L
+        minFvgSz = orRange * i_m6_fvgMinSize
+        slDist   = ref_atr14 * i_atrMult
+
+        // bar_index > _fvgFormedBar ensures signal never fires on the same bar the FVG formed
+        if _fvgBull and not na(_fvgTop) and not na(_fvgBot) and bar_index > _fvgFormedBar
+            fvgSz = _fvgTop - _fvgBot
+            if fvgSz >= minFvgSz
+                // Price pulls back into FVG zone and closes back above it — bounce entry at close
+                if ref_low <= _fvgTop and ref_close > _fvgTop and ref_close > ref_vwap
+                    sig_m6_bull   := true
+                    entryP         = ref_close          // actual fill price, not the stale FVG top
+                    slP            = _fvgBot - slDist * 0.5
+                    tpP            = entryP + (entryP - slP) * i_m6_rratio
+                    f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
+                    f_drawLabel("M6 FVG", entryP, slP, tpP, true, 1.4)
+                    f_registerTrade(6, entryP, slP, tpP, true)
+                    if i_showBox
+                        array.push(_boxes, box.new(bar_index-3, _fvgTop, bar_index+15, _fvgBot,
+                             bgcolor=color.new(#FF9800,80), border_color=color.new(#FF9800,0)))
+                    _fvgTriggered := true
+
+        if _fvgBear and not na(_fvgTop) and not na(_fvgBot) and not _fvgTriggered and bar_index > _fvgFormedBar
+            fvgSz = _fvgTop - _fvgBot
+            if fvgSz >= minFvgSz
+                if ref_high >= _fvgBot and ref_close < _fvgBot and ref_close < ref_vwap
+                    sig_m6_bear   := true
+                    entryP         = ref_close          // actual fill price, not the stale FVG bot
+                    slP            = _fvgTop + slDist * 0.5
+                    tpP            = entryP - (slP - entryP) * i_m6_rratio
+                    f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
+                    f_drawLabel("M6 FVG", entryP, slP, tpP, false, 1.4)
+                    f_registerTrade(6, entryP, slP, tpP, false)
+                    if i_showBox
+                        array.push(_boxes, box.new(bar_index-3, _fvgTop, bar_index+15, _fvgBot,
+                             bgcolor=color.new(#FF9800,80), border_color=color.new(#FF9800,0)))
+                    _fvgTriggered := true
+
+// ============================================================
+// SECTION 17 — MODEL 9: Failed ORB Reversal (INLINE — stateful)
+// ============================================================
+
+if i_m9_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and not na(_or15L)
+    if _refEdge and inNYSession
+        slDist = ref_atr14 * i_atrMult
+
+        // Detect initial breakout attempt
+        if not _m9BullBreak and not _m9BearBreak
+            if ref_close > _or15H
+                _m9BullBreak   := true
+                _m9BreakBar    := bar_index
+                _m9InsideCount := 0
+            else if ref_close < _or15L
+                _m9BearBreak   := true
+                _m9BreakBar    := bar_index
+                _m9InsideCount := 0
+
+        // Track bars returning inside OR after bull breakout
+        if _m9BullBreak and not _m9BearBreak
+            if ref_close <= _or15H and ref_close >= _or15L
+                _m9InsideCount += 1
+            else if ref_close > _or15H
+                _m9InsideCount := 0  // still outside, reset counter
+            // Enough bars back inside → bull failed → short at market (close)
+            if _m9InsideCount >= i_m9_failBars and not pastCutoff
+                sig_m9_bear    := true
+                entryP          = ref_close
+                slP             = _or15H + slDist * 0.5
+                tpP             = entryP - (slP - entryP) * i_m9_rratio
+                f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
+                f_drawLabel("M9 FailORB", entryP, slP, tpP, false, 4.6)
+                f_registerTrade(9, entryP, slP, tpP, false)
+                _m9BullBreak   := false
+                _m9InsideCount := 0
+
+        // Track bars returning inside OR after bear breakout
+        if _m9BearBreak and not _m9BullBreak
+            if ref_close >= _or15L and ref_close <= _or15H
+                _m9InsideCount += 1
+            else if ref_close < _or15L
+                _m9InsideCount := 0
+            // Enough bars back inside → bear failed → long at market (close)
+            if _m9InsideCount >= i_m9_failBars and not pastCutoff
+                sig_m9_bull    := true
+                entryP          = ref_close
+                slP             = _or15L - slDist * 0.5
+                tpP             = entryP + (entryP - slP) * i_m9_rratio
+                f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
+                f_drawLabel("M9 FailORB", entryP, slP, tpP, true, 4.6)
+                f_registerTrade(9, entryP, slP, tpP, true)
+                _m9BearBreak   := false
+                _m9InsideCount := 0
+
+// ============================================================
+// SECTION 17B — TRADE STATUS TRACKER (inline, global scope)
+// Resolves active trades against bar price action each bar
+// ============================================================
+
+trSz = array.size(_trStatus)
+if trSz > 0
+    for _ti = 0 to trSz - 1
+        // bar_index > _trBar guard: never resolve a trade on the same bar it was entered.
+        // Without this, the signal bar's own low/high (which predate the entry) would
+        // immediately trigger SL/TP on the same confirmed bar.
+        if array.get(_trStatus, _ti) == 0 and bar_index > array.get(_trBar, _ti)
+            _tEntry = array.get(_trEntry, _ti)
+            _tSL    = array.get(_trSL,    _ti)
+            _tTP    = array.get(_trTP,    _ti)
+            _tDir   = array.get(_trDir,   _ti)
+            _tpHit  = _tDir == 1 ? high >= _tTP : low  <= _tTP
+            _slHit  = _tDir == 1 ? low  <= _tSL : high >= _tSL
+            if _tpHit and _slHit
+                // Same-bar conflict: closer to open wins; candle direction as tiebreaker
+                _distToTP = math.abs(open - _tTP)
+                _distToSL = math.abs(open - _tSL)
+                _bullCandle = close >= open
+                _outcome = 0
+                if _distToSL < _distToTP
+                    _outcome := -1  // SL closer to open → SL hit
+                else if _distToTP < _distToSL
+                    _outcome := 1   // TP closer to open → TP hit
+                else
+                    // Equal distance: use candle direction
+                    _outcome := (_tDir == 1 and _bullCandle) or (_tDir == -1 and not _bullCandle) ? 1 : -1
+                array.set(_trStatus, _ti, _outcome)
+                _mI = array.get(_trModel, _ti) - 1
+                if _outcome == 1
+                    array.set(_mWins,   _mI, array.get(_mWins,   _mI) + 1)
+                else
+                    array.set(_mLosses, _mI, array.get(_mLosses, _mI) + 1)
+            else if _tpHit
+                array.set(_trStatus, _ti, 1)
+                _mI = array.get(_trModel, _ti) - 1
+                array.set(_mWins, _mI, array.get(_mWins, _mI) + 1)
+            else if _slHit
+                array.set(_trStatus, _ti, -1)
+                _mI = array.get(_trModel, _ti) - 1
+                array.set(_mLosses, _mI, array.get(_mLosses, _mI) + 1)
+
+// Trim old trades when array exceeds i_maxTrades
+while array.size(_trEntry) > i_maxTrades
+    array.shift(_trEntry)
+    array.shift(_trSL)
+    array.shift(_trTP)
+    array.shift(_trModel)
+    array.shift(_trDir)
+    array.shift(_trStatus)
+    array.shift(_trBar)
+    array.shift(_trDay)
+
+// ============================================================
+// SECTION 17C — DAY BIAS CALCULATION
+// 4-method weighted aggregation (computed once per bar)
+// ============================================================
+
+// HTF Trend (35%): EMA20/50 alignment
+_bHTF = htfClose > htfEma20 and htfEma20 > htfEma50 ? 35.0 :
+         htfClose > htfEma50 ? 17.5 :
+         htfClose < htfEma20 and htfEma20 < htfEma50 ? -35.0 :
+         htfClose < htfEma50 ? -17.5 : 0.0
+
+// VWAP Position (30%)
+_bVWAP = not na(ref_vwap) ? (ref_close > ref_vwap ? 30.0 : -30.0) : 0.0
+
+// Gap Direction (17.5%): today's open vs prior close
+_bGap = na(_pdClose) or _pdClose == 0 ? 0.0 :
+         dOpen > _pdClose ? 17.5 : dOpen < _pdClose ? -17.5 : 0.0
+
+// Prev Close in Prev Range (17.5%)
+_pdRange = _pdHigh - _pdLow
+_bPrev = _pdRange > 0 ?
+         (_pdClose >= _pdHigh - _pdRange * 0.33 ? 17.5 :
+          _pdClose <= _pdLow  + _pdRange * 0.33 ? -17.5 : 0.0) : 0.0
+
+_biasScore := _bHTF + _bVWAP + _bGap + _bPrev
+_dayBias   := _biasScore >= 35 ? "BULLISH" : _biasScore <= -35 ? "BEARISH" : "NEUTRAL"
+
+// ============================================================
+// SECTION 18 — CONFIDENCE SCORE ENGINE (Combined mode)
+// ============================================================
+
+// All scoring functions are pure (read-only global access)
+
+f_scoreVolume(_rvol) =>
+    _rvol >= 2.0 ? 100.0 : _rvol >= 1.5 ? 80.0 : _rvol >= 1.2 ? 60.0 : 20.0
+
+f_scoreHTF(isBull) =>
+    if isBull
+        (htfClose > htfEma20 and htfEma20 > htfEma50) ? 100.0 :
+         htfClose > htfEma20 ? 60.0 : 0.0
+    else
+        (htfClose < htfEma20 and htfEma20 < htfEma50) ? 100.0 :
+         htfClose < htfEma20 ? 60.0 : 0.0
+
+f_scoreDayType() =>
+    gapPct = na(_pdClose) or _pdClose == 0 ? 0.0 :
+              math.abs(dOpen - _pdClose) / _pdClose * 100.0
+    gapPct >= 0.5 ? 100.0 : gapPct >= 0.3 ? 70.0 : 30.0
+
+f_scoreNR() =>
+    isNR7 ? 100.0 : isNR4 ? 70.0 : 20.0
+
+f_scoreATR() =>
+    if na(_or15H) or na(_or15L) or na(ref_atr14) or ref_atr14 == 0
+        0.0
+    else
+        ratio = (_or15H - _or15L) / ref_atr14
+        (ratio >= 0.5 and ratio <= 1.5) ? 100.0 :
+         (ratio >= 0.3 and ratio <= 2.0) ? 60.0 : 20.0
+
+f_scoreCloseQuality(isBull, _rc, _ratr) =>
+    if na(_or15H) or na(_or15L) or na(_ratr) or _ratr == 0
+        0.0
+    else if isBull
+        pen = _rc - _or15H
+        pen >= _ratr * 0.5 ? 100.0 : pen >= _ratr * 0.25 ? 70.0 : pen > 0 ? 40.0 : 0.0
+    else
+        pen = _or15L - _rc
+        pen >= _ratr * 0.5 ? 100.0 : pen >= _ratr * 0.25 ? 70.0 : pen > 0 ? 40.0 : 0.0
+
+f_scoreVWAP(isBull, _rc, _rvwap) =>
+    na(_rvwap) ? 0.0 : isBull ? (_rc > _rvwap ? 100.0 : 0.0) : (_rc < _rvwap ? 100.0 : 0.0)
+
+f_scoreOrderFlow(isBull, _rh, _rl, _rc, _bullBar, _bearBar) =>
+    cRange = _rh - _rl
+    if cRange == 0
+        0.0
+    else
+        // Use close vs midpoint as a TF-consistent body-strength proxy
+        midP  = (_rh + _rl) / 2.0
+        ratio = math.abs(_rc - midP) / (cRange / 2.0)
+        if isBull
+            _bullBar ? (ratio >= 0.6 ? 100.0 : ratio >= 0.4 ? 70.0 : 40.0) : 0.0
+        else
+            _bearBar ? (ratio >= 0.6 ? 100.0 : ratio >= 0.4 ? 70.0 : 40.0) : 0.0
+
+// _rc/_rc1/_ratr/_rvol/_rvwap/_rh/_rl/_bullBar/_bearBar: TF data to use for scoring
+f_confidence(isBull, _rc, _ratr, _rvol, _rvwap, _rh, _rl, _bullBar, _bearBar) =>
+    totalW = i_wVol + i_wHTF + i_wDay + i_wNR + i_wATR + i_wClose + i_wVWAP + i_wFlow
+    if totalW == 0
+        0.0
+    else
+        wSum = f_scoreVolume(_rvol)                              * i_wVol  +
+               f_scoreHTF(isBull)                               * i_wHTF  +
+               f_scoreDayType()                                 * i_wDay  +
+               f_scoreNR()                                      * i_wNR   +
+               f_scoreATR()                                     * i_wATR  +
+               f_scoreCloseQuality(isBull, _rc, _ratr)          * i_wClose +
+               f_scoreVWAP(isBull, _rc, _rvwap)                 * i_wVWAP +
+               f_scoreOrderFlow(isBull, _rh, _rl, _rc, _bullBar, _bearBar) * i_wFlow
+        wSum / totalW
+
+f_grade(score) =>
+    score >= 80 ? "A" : score >= 60 ? "B" : score >= 40 ? "C" : "F"
+
+// ── Combined Mode Signal (INLINE) ─────────────────────────────
+// Uses fast TF (default 1m) for signal trigger and scoring — best per CSV (50–90% WR)
+if i_mode == "Combined" and _or15Complete and not na(_or15H) and not na(_or15L)
+    if _fastEdge and not pastCutoff and inNYSession
+        slDist = fast_atr14 * i_atrMult
+
+        if fast_close > _or15H and fast_close1 <= _or15H and not _combLongFired
+            score = f_confidence(true, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar)
+            if score >= float(i_minScore)
+                sig_comb_bull   := true
+                _combLongFired  := true
+                _confScore      := score
+                _confBull       := true
+                _confGrade      := f_grade(score)
+                entryP         = _or15H
+                slP            = entryP - slDist
+                tpP            = entryP + slDist * 2.0
+                f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
+                f_registerTrade(10, entryP, slP, tpP, true)
+                if i_showLabels
+                    array.push(_labels, label.new(bar_index, low - atr14 * 0.5,
+                         text      = "COMBINED LONG\nEntry: " + str.tostring(entryP, format.mintick) +
+                                     "\nSL: "    + str.tostring(slP, format.mintick) +
+                                     "\nTP: "    + str.tostring(tpP, format.mintick) +
+                                     "\nScore: " + str.tostring(math.round(score)) + "% [" + f_grade(score) + "]",
+                         color     = i_colBull,
+                         style     = label.style_label_up,
+                         textcolor = color.white,
+                         size      = size.normal))
+
+        if fast_close < _or15L and fast_close1 >= _or15L and not _combShortFired
+            score = f_confidence(false, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar)
+            if score >= float(i_minScore)
+                sig_comb_bear   := true
+                _combShortFired := true
+                _confScore      := score
+                _confBull       := false
+                _confGrade      := f_grade(score)
+                entryP         = _or15L
+                slP            = entryP + slDist
+                tpP            = entryP - slDist * 2.0
+                f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
+                f_registerTrade(10, entryP, slP, tpP, false)
+                if i_showLabels
+                    array.push(_labels, label.new(bar_index, high + atr14 * 0.5,
+                         text      = "COMBINED SHORT\nEntry: " + str.tostring(entryP, format.mintick) +
+                                     "\nSL: "    + str.tostring(slP, format.mintick) +
+                                     "\nTP: "    + str.tostring(tpP, format.mintick) +
+                                     "\nScore: " + str.tostring(math.round(score)) + "% [" + f_grade(score) + "]",
+                         color     = i_colBear,
+                         style     = label.style_label_down,
+                         textcolor = color.white,
+                         size      = size.normal))
+
+// ============================================================
+// SECTION 18B — DAY BIAS CHART LABEL (always visible, both modes)
+// Floats at the right edge of the chart, updates every bar
+// ============================================================
+
+_biasArrow  = _dayBias == "BULLISH" ? " ▲" : _dayBias == "BEARISH" ? " ▼" : " —"
+_biasHTFStr = htfClose > htfEma20 and htfEma20 > htfEma50 ? "Bull" : htfClose < htfEma20 and htfEma20 < htfEma50 ? "Bear" : "Neutral"
+_biasVWAPStr = not na(ref_vwap) ? (ref_close > ref_vwap ? "Above" : "Below") : "NA"
+_biasScoreStr = str.tostring(math.round(math.abs(_biasScore))) + "%"
+_biasLabelTxt = "DAY BIAS: " + _dayBias + _biasArrow + "\nScore: " + _biasScoreStr + "\nHTF: " + _biasHTFStr + "  VWAP: " + _biasVWAPStr
+_biasLabelClr = _dayBias == "BULLISH" ? color.new(#00E676, 15) : _dayBias == "BEARISH" ? color.new(#FF1744, 15) : color.new(#607D8B, 15)
+_biasLabelY   = ref_close + ref_atr14 * 2.0
+
+if na(_biasChartLabel)
+    _biasChartLabel := label.new(bar_index, _biasLabelY, _biasLabelTxt,
+         color=_biasLabelClr, style=label.style_label_left,
+         textcolor=color.white, size=size.normal)
+else
+    label.set_x(_biasChartLabel, bar_index)
+    label.set_y(_biasChartLabel, _biasLabelY)
+    label.set_text(_biasChartLabel, _biasLabelTxt)
+    label.set_color(_biasChartLabel, _biasLabelClr)
+
+// ============================================================
+// SECTION 18C — COMBINED PENDING SETUP (limit-order preview)
+// Shows potential long/short at OR levels BEFORE breakout fires
+// Gives user time to place limit orders at OR H/L in advance
+// ============================================================
+
+if i_mode == "Combined" and _or15Complete and not na(_or15H) and not na(_or15L) and not pastCutoff and inNYSession
+    _pendSlDist = fast_atr14 * i_atrMult
+
+    // ── Pending Long (at OR High) ──────────────────────────────
+    if not _combLongFired
+        _pEntryL = _or15H
+        _pSlL    = _pEntryL - _pendSlDist
+        _pTpL    = _pEntryL + _pendSlDist * 2.0
+        _pScoreL = f_confidence(true, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar)
+        _pGradeL = f_grade(_pScoreL)
+        _pArmL   = _pScoreL >= float(i_minScore)
+        _pTxtL   = "⏳ LIMIT LONG  @" + str.tostring(_pEntryL, format.mintick) +
+                   "\nSL: "  + str.tostring(_pSlL, format.mintick) +
+                   "\nTP: "  + str.tostring(_pTpL, format.mintick) +
+                   "\nScore: " + str.tostring(math.round(_pScoreL)) + "% [" + _pGradeL + "]" +
+                   (_pArmL ? "  ✓ ARMED" : "  ✗ BELOW MIN")
+        _pClrL   = _pArmL ? color.new(#00E676, 15) : color.new(#607D8B, 40)
+        if na(_combPendLong)
+            _combPendLong := label.new(bar_index, _or15H + _pendSlDist * 0.4, _pTxtL,
+                 color=_pClrL, style=label.style_label_down,
+                 textcolor=color.white, size=size.small)
+        else
+            label.set_x(_combPendLong, bar_index)
+            label.set_y(_combPendLong, _or15H + _pendSlDist * 0.4)
+            label.set_text(_combPendLong, _pTxtL)
+            label.set_color(_combPendLong, _pClrL)
+    else
+        if not na(_combPendLong)
+            label.delete(_combPendLong)
+            _combPendLong := na
+
+    // ── Pending Short (at OR Low) ──────────────────────────────
+    if not _combShortFired
+        _pEntryS = _or15L
+        _pSlS    = _pEntryS + _pendSlDist
+        _pTpS    = _pEntryS - _pendSlDist * 2.0
+        _pScoreS = f_confidence(false, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar)
+        _pGradeS = f_grade(_pScoreS)
+        _pArmS   = _pScoreS >= float(i_minScore)
+        _pTxtS   = "⏳ LIMIT SHORT  @" + str.tostring(_pEntryS, format.mintick) +
+                   "\nSL: "  + str.tostring(_pSlS, format.mintick) +
+                   "\nTP: "  + str.tostring(_pTpS, format.mintick) +
+                   "\nScore: " + str.tostring(math.round(_pScoreS)) + "% [" + _pGradeS + "]" +
+                   (_pArmS ? "  ✓ ARMED" : "  ✗ BELOW MIN")
+        _pClrS   = _pArmS ? color.new(#FF1744, 15) : color.new(#607D8B, 40)
+        if na(_combPendShort)
+            _combPendShort := label.new(bar_index, _or15L - _pendSlDist * 0.4, _pTxtS,
+                 color=_pClrS, style=label.style_label_up,
+                 textcolor=color.white, size=size.small)
+        else
+            label.set_x(_combPendShort, bar_index)
+            label.set_y(_combPendShort, _or15L - _pendSlDist * 0.4)
+            label.set_text(_combPendShort, _pTxtS)
+            label.set_color(_combPendShort, _pClrS)
+    else
+        if not na(_combPendShort)
+            label.delete(_combPendShort)
+            _combPendShort := na
+
+// ============================================================
+// SECTION 19 — DASHBOARD TABLES
+// ============================================================
+
+f_tablePos(p) =>
+    p == "Top Right"    ? position.top_right    :
+     p == "Top Left"    ? position.top_left     :
+     p == "Bottom Right"? position.bottom_right :
+                          position.bottom_left
+
+C_HEAD    = color.new(#1565C0, 0)
+C_NONE    = color.new(#1A1D26, 0)
+C_BULL_DIM = color.new(#00E676, 50)
+C_BEAR_DIM = color.new(#FF1744, 50)
+C_TXT     = color.white
+C_TXT_DIM = color.new(color.white, 40)
+
+// ── Win-rate helper: reads per-model counters (unaffected by array trim or other models) ─
+f_winRate(modelIdx) =>
+    _wi = modelIdx - 1
+    w   = array.get(_mWins,   _wi)
+    l   = array.get(_mLosses, _wi)
+    [w, l, w + l]
+
+// ── Multi-Model Dashboard ─────────────────────────────────────
+if i_showDashboard and i_mode == "Multi-Model"
+    if na(_dashTable)
+        _dashTable := table.new(f_tablePos(i_dashPos), 10, 9,
+             bgcolor       = color.new(#1A1D26, 10),
+             border_color  = color.new(color.gray, 50),
+             border_width  = 1,
+             frame_color   = color.new(color.gray, 30),
+             frame_width   = 1)
+
+    // Header row
+    table.cell(_dashTable, 0, 0, "MODEL",   text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_dashTable, 1, 0, "SIGNAL",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_dashTable, 2, 0, "DIR",     text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_dashTable, 3, 0, "ENTRY",   text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_dashTable, 4, 0, "SL",      text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_dashTable, 5, 0, "TP",      text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_dashTable, 6, 0, "WIN%",    text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_dashTable, 7, 0, "OR HIGH", text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_dashTable, 8, 0, "OR LOW",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_dashTable, 9, 0, "ENTRY TF",text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+
+    // Data rows — read from persistent _dashSignal and _lastEntry/SL/TP arrays
+    orHStr = na(_or15H) ? "-" : str.tostring(_or15H, format.mintick)
+    orLStr = na(_or15L) ? "-" : str.tostring(_or15L, format.mintick)
+
+    mNames = array.from("1.Crabel","3.5min","4.15min","6.FVG","7.Gold","9.FailORB")
+    mIdxs  = array.from(1, 3, 4, 6, 7, 9)
+
+    // Actual reference TF per model (driven by i_refTF_fast / i_refTF inputs):
+    // M1 Crabel  → fast TF (i_refTF_fast, default 1m)
+    // M3/M4/M6/M7/M9 → primary TF (i_refTF, default 5m)
+    C_TF = color.new(#00BCD4, 0)  // cyan — distinct from signal colours
+    mTFs = array.from(i_refTF_fast, i_refTF, i_refTF, i_refTF, i_refTF, i_refTF)
+
+    for i = 0 to 5
+        dSig    = array.get(_dashSignal, i)
+        isBull  = dSig == 1
+        isBear  = dSig == -1
+        rowBG   = isBull ? C_BULL_DIM : isBear ? C_BEAR_DIM : C_NONE
+        sigStr  = isBull ? "LONG"   : isBear ? "SHORT"  : "-"
+        dirStr  = isBull ? "▲ BULL" : isBear ? "▼ BEAR" : "-"
+        sigClr  = isBull ? i_colBull : isBear ? i_colBear : C_TXT_DIM
+        lEntry  = array.get(_lastEntry, i)
+        lSL     = array.get(_lastSL, i)
+        lTP     = array.get(_lastTP, i)
+        entStr  = na(lEntry) ? "-" : str.tostring(lEntry, format.mintick)
+        slStr   = na(lSL)    ? "-" : str.tostring(lSL,    format.mintick)
+        tpStr   = na(lTP)    ? "-" : str.tostring(lTP,    format.mintick)
+        [mW, mL, mT] = f_winRate(array.get(mIdxs, i))
+        wrStr   = mT >= 1 ? str.tostring(math.round(float(mW) / float(mT) * 100)) + "%" : "-"
+        wrClr   = mT < 1 ? C_TXT_DIM : float(mW) / float(mT) >= 0.6 ? color.new(#00E676,0) :
+                   float(mW) / float(mT) >= 0.5 ? color.new(#FF9800,0) : color.new(#FF1744,0)
+        row     = i + 1
+        table.cell(_dashTable, 0, row, array.get(mNames,i),  text_color=C_TXT,    bgcolor=rowBG, text_size=size.tiny)
+        table.cell(_dashTable, 1, row, sigStr,                text_color=sigClr,   bgcolor=rowBG, text_size=size.tiny)
+        table.cell(_dashTable, 2, row, dirStr,                text_color=sigClr,   bgcolor=rowBG, text_size=size.tiny)
+        table.cell(_dashTable, 3, row, entStr,                text_color=sigClr,   bgcolor=rowBG, text_size=size.tiny)
+        table.cell(_dashTable, 4, row, slStr,                 text_color=color.new(#FF5252,0), bgcolor=rowBG, text_size=size.tiny)
+        table.cell(_dashTable, 5, row, tpStr,                 text_color=color.new(#69F0AE,0), bgcolor=rowBG, text_size=size.tiny)
+        table.cell(_dashTable, 6, row, wrStr,                 text_color=wrClr,    bgcolor=rowBG, text_size=size.tiny)
+        table.cell(_dashTable, 7, row, orHStr,                text_color=C_TXT_DIM,bgcolor=rowBG, text_size=size.tiny)
+        table.cell(_dashTable, 8, row, orLStr,                text_color=C_TXT_DIM,bgcolor=rowBG, text_size=size.tiny)
+        table.cell(_dashTable, 9, row, array.get(mTFs, i),    text_color=C_TF,     bgcolor=rowBG, text_size=size.tiny)
+
+// ── Combined Mode Checklist ───────────────────────────────────
+if i_showDashboard and i_mode == "Combined"
+    if na(_checkTable)
+        _checkTable := table.new(f_tablePos(i_dashPos), 4, 11,
+             bgcolor       = color.new(#1A1D26, 10),
+             border_color  = color.new(color.gray, 50),
+             border_width  = 1,
+             frame_color   = color.new(color.gray, 30),
+             frame_width   = 1)
+
+    // Header
+    table.cell(_checkTable, 0, 0, "FACTOR",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_checkTable, 1, 0, "SCORE",   text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_checkTable, 2, 0, "WEIGHT",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_checkTable, 3, 0, "STATUS",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+
+    // Direction for scoring context
+    isBullCtx = _confBull
+
+    sVol  = f_scoreVolume(fast_rvol)
+    sHTF  = f_scoreHTF(isBullCtx)
+    sDay  = f_scoreDayType()
+    sNR   = f_scoreNR()
+    sATR  = f_scoreATR()
+    sCls  = f_scoreCloseQuality(isBullCtx, fast_close, fast_atr14)
+    sVWAP = f_scoreVWAP(isBullCtx, fast_close, fast_vwap)
+    sFlow = f_scoreOrderFlow(isBullCtx, fast_high, fast_low, fast_close, fast_bullBar, fast_bearBar)
+
+    fNames  = array.from("Volume","HTF Trend","Day Type","NR7/NR4","ATR Width","Close Qual","VWAP","OrderFlow")
+    fScores = array.from(sVol, sHTF, sDay, sNR, sATR, sCls, sVWAP, sFlow)
+    fWeights= array.from(i_wVol, i_wHTF, i_wDay, i_wNR, i_wATR, i_wClose, i_wVWAP, i_wFlow)
+
+    for i = 0 to 7
+        sc     = array.get(fScores,  i)
+        wt     = array.get(fWeights, i)
+        fn     = array.get(fNames,   i)
+        stStr  = sc >= 70 ? "✓ PASS" : sc >= 40 ? "~ PART" : "✗ FAIL"
+        stClr  = sc >= 70 ? color.new(#00E676,0) : sc >= 40 ? color.new(#FF9800,0) : color.new(#FF1744,0)
+        table.cell(_checkTable, 0, i+1, fn,                            text_color=C_TXT,    bgcolor=C_NONE, text_size=size.tiny)
+        table.cell(_checkTable, 1, i+1, str.tostring(math.round(sc)),  text_color=C_TXT,    bgcolor=C_NONE, text_size=size.tiny)
+        table.cell(_checkTable, 2, i+1, str.tostring(wt) + "%",        text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+        table.cell(_checkTable, 3, i+1, stStr,                         text_color=stClr,    bgcolor=C_NONE, text_size=size.tiny)
+
+    // Summary row
+    totalSc  = f_confidence(isBullCtx, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar)
+    gradeStr = f_grade(totalSc)
+    gradeClr = totalSc >= 80 ? color.new(#00E676,0) : totalSc >= 60 ? color.new(#FF9800,0) : color.new(#FF1744,0)
+    armedStr = totalSc >= float(i_minScore) ? "ARMED" : "BELOW MIN"
+    table.cell(_checkTable, 0, 9, "TOTAL SCORE",                          text_color=C_TXT,   bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_checkTable, 1, 9, str.tostring(math.round(totalSc)) + "%",text_color=gradeClr,bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_checkTable, 2, 9, "Grade: " + gradeStr,                   text_color=gradeClr,bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_checkTable, 3, 9, armedStr,                               text_color=gradeClr,bgcolor=C_HEAD, text_size=size.small)
+
+// ── RVOL display row (row 10) ─────────────────────────────────
+if i_showDashboard and i_mode == "Multi-Model" and not na(_dashTable)
+    rvolStr = str.tostring(math.round(ref_rvol * 100) / 100.0)
+    rvolClr = ref_rvol >= 2.0 ? color.new(#FF6F00,0) : ref_rvol >= 1.5 ? color.new(#FF9800,0) : C_TXT_DIM
+    table.cell(_dashTable, 0, 7, "RVOL: " + rvolStr, text_color=rvolClr,   bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 1, 7, "ATR: "  + str.tostring(math.round(ref_atr14 * 100) / 100.0),
+         text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 2, 7, "VWAP: " + str.tostring(ref_vwap, format.mintick),
+         text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 3, 7, isNR7 ? "NR7" : isNR4 ? "NR4" : "-",
+         text_color=isNR7 or isNR4 ? color.new(#FF9800,0) : C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 4, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 5, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 6, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 7, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 8, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 9, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+
+    // Day Bias row (row 8)
+    biasClr = _dayBias == "BULLISH" ? color.new(#00E676,0) :
+               _dayBias == "BEARISH" ? color.new(#FF1744,0) : C_TXT_DIM
+    biasBG  = _dayBias == "BULLISH" ? color.new(#00E676,85) :
+               _dayBias == "BEARISH" ? color.new(#FF1744,85) : C_NONE
+    biasScoreStr = str.tostring(math.round(math.abs(_biasScore))) + "%"
+    table.cell(_dashTable, 0, 8, "DAY BIAS",        text_color=C_TXT,    bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_dashTable, 1, 8, _dayBias,           text_color=biasClr,  bgcolor=biasBG, text_size=size.tiny)
+    table.cell(_dashTable, 2, 8, biasScoreStr,        text_color=biasClr,  bgcolor=biasBG, text_size=size.tiny)
+    table.cell(_dashTable, 3, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 4, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 5, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 6, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 7, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 8, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 9, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+
+// ============================================================
+// SECTION 19B — ENTRIES / TRADES TABLE (today's trades)
+// ============================================================
+
+if i_showTradeTable
+    if na(_tradeTable)
+        _tradeTable := table.new(f_tablePos(i_tradeTablePos), 6, 13,
+             bgcolor       = color.new(#1A1D26, 10),
+             border_color  = color.new(color.gray, 50),
+             border_width  = 1,
+             frame_color   = color.new(color.gray, 30),
+             frame_width   = 1)
+
+    // Header
+    table.cell(_tradeTable, 0, 0, "MODEL",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_tradeTable, 1, 0, "DIR",    text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_tradeTable, 2, 0, "ENTRY",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_tradeTable, 3, 0, "SL",     text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_tradeTable, 4, 0, "TP",     text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_tradeTable, 5, 0, "STATUS", text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+
+    // Collect today's trades
+    _todayWins   = 0
+    _todayTotal  = 0
+    _displayRow  = 1
+    trSz2 = array.size(_trStatus)
+    if trSz2 > 0
+        for _ti2 = trSz2 - 1 to 0
+            if _displayRow > 10
+                break
+            if array.get(_trDay, _ti2) == currentDay
+                _tMdl = array.get(_trModel, _ti2)
+                _tDir2 = array.get(_trDir,   _ti2)
+                _tSt  = array.get(_trStatus, _ti2)
+                _tEnt = array.get(_trEntry,  _ti2)
+                _tSl2 = array.get(_trSL,     _ti2)
+                _tTp2 = array.get(_trTP,     _ti2)
+                _mNameStr = _tMdl == 1  ? "M1 Crabel" :
+                             _tMdl == 3  ? "M3 5min"   :
+                             _tMdl == 4  ? "M4 15min"  :
+                             _tMdl == 6  ? "M6 FVG"    :
+                             _tMdl == 7  ? "M7 Gold"   :
+                             _tMdl == 9  ? "M9 FailORB": "Combined"
+                _dirStr2 = _tDir2 == 1 ? "▲ LONG" : "▼ SHORT"
+                _dirClr  = _tDir2 == 1 ? i_colBull : i_colBear
+                _stStr   = _tSt == 0 ? "IN PROG" : _tSt == 1 ? "TP HIT" : "SL HIT"
+                _stClr   = _tSt == 0 ? color.new(#FF9800,0) : _tSt == 1 ? color.new(#00E676,0) : color.new(#FF1744,0)
+                _rowBG2  = _tSt == 0 ? color.new(#FF9800,85) : _tSt == 1 ? color.new(#00E676,85) : color.new(#FF1744,85)
+                table.cell(_tradeTable, 0, _displayRow, _mNameStr,                           text_color=C_TXT,  bgcolor=_rowBG2, text_size=size.tiny)
+                table.cell(_tradeTable, 1, _displayRow, _dirStr2,                             text_color=_dirClr,bgcolor=_rowBG2, text_size=size.tiny)
+                table.cell(_tradeTable, 2, _displayRow, str.tostring(_tEnt, format.mintick),  text_color=C_TXT,  bgcolor=_rowBG2, text_size=size.tiny)
+                table.cell(_tradeTable, 3, _displayRow, str.tostring(_tSl2, format.mintick),  text_color=color.new(#FF5252,0), bgcolor=_rowBG2, text_size=size.tiny)
+                table.cell(_tradeTable, 4, _displayRow, str.tostring(_tTp2, format.mintick),  text_color=color.new(#69F0AE,0), bgcolor=_rowBG2, text_size=size.tiny)
+                table.cell(_tradeTable, 5, _displayRow, _stStr,                               text_color=_stClr, bgcolor=_rowBG2, text_size=size.tiny)
+                if _tSt != 0
+                    _todayTotal += 1
+                    if _tSt == 1
+                        _todayWins += 1
+                _displayRow += 1
+
+    // Fill empty rows up to row 11
+    if _displayRow <= 11
+        for _er = _displayRow to 11
+            table.cell(_tradeTable, 0, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+            table.cell(_tradeTable, 1, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+            table.cell(_tradeTable, 2, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+            table.cell(_tradeTable, 3, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+            table.cell(_tradeTable, 4, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+            table.cell(_tradeTable, 5, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+
+    // Summary row
+    _todayWrStr = _todayTotal > 0 ?
+         "Today: " + str.tostring(_todayWins) + "/" + str.tostring(_todayTotal) +
+         " (" + str.tostring(math.round(float(_todayWins) / float(_todayTotal) * 100)) + "%)" :
+         "Today: No completed trades"
+    _summClr = _todayTotal == 0 ? C_TXT_DIM :
+               float(_todayWins) / float(_todayTotal) >= 0.5 ? color.new(#00E676,0) : color.new(#FF1744,0)
+    table.cell(_tradeTable, 0, 12, _todayWrStr, text_color=_summClr, bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_tradeTable, 1, 12, "",           text_color=C_TXT_DIM,bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_tradeTable, 2, 12, "",           text_color=C_TXT_DIM,bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_tradeTable, 3, 12, "",           text_color=C_TXT_DIM,bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_tradeTable, 4, 12, "",           text_color=C_TXT_DIM,bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_tradeTable, 5, 12, "",           text_color=C_TXT_DIM,bgcolor=C_HEAD, text_size=size.tiny)
+
+// ============================================================
+// SECTION 19C — BEST MODEL TABLE
+// ============================================================
+
+if i_showBestModel
+    if na(_bestTable)
+        _bestTable := table.new(f_tablePos(i_bestModelPos), 3, 9,
+             bgcolor       = color.new(#1A1D26, 10),
+             border_color  = color.new(color.gray, 50),
+             border_width  = 1,
+             frame_color   = color.new(color.gray, 30),
+             frame_width   = 1)
+
+    // Header
+    table.cell(_bestTable, 0, 0, "MODEL",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_bestTable, 1, 0, "WIN%",   text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_bestTable, 2, 0, "TRADES", text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+
+    _bmNames  = array.from("M1 Crabel","M3 5min","M4 15min","M6 FVG","M7 Gold","M9 FailORB","Combined")
+    _bmIdxs   = array.from(1, 3, 4, 6, 7, 9, 10)
+
+    _bestWR   = -1.0
+    _bestName = ""
+    _bestRow  = 0
+
+    for _bi = 0 to 6
+        [_bW, _bL, _bT] = f_winRate(array.get(_bmIdxs, _bi))
+        _bWR   = _bT >= 1 ? float(_bW) / float(_bT) * 100.0 : -1.0
+        _wrStr2 = _bT >= 1 ? str.tostring(math.round(_bWR)) + "%" : "-"
+        _trStr  = _bT >= 1 ? str.tostring(_bT) : "0"
+        _rowClr = _bT < 3  ? C_TXT_DIM :
+                   _bWR >= 60 ? color.new(#00E676,0) :
+                   _bWR >= 50 ? color.new(#FF9800,0) : color.new(#FF1744,0)
+        _rowBG3 = C_NONE
+        table.cell(_bestTable, 0, _bi + 1, array.get(_bmNames, _bi), text_color=_rowClr, bgcolor=_rowBG3, text_size=size.tiny)
+        table.cell(_bestTable, 1, _bi + 1, _wrStr2,                   text_color=_rowClr, bgcolor=_rowBG3, text_size=size.tiny)
+        table.cell(_bestTable, 2, _bi + 1, _trStr,                    text_color=_rowClr, bgcolor=_rowBG3, text_size=size.tiny)
+        if _bT >= 3 and _bWR > _bestWR
+            _bestWR   := _bWR
+            _bestName := array.get(_bmNames, _bi)
+            _bestRow  := _bi + 1
+
+    // Highlight best model row
+    if _bestRow > 0
+        table.cell(_bestTable, 0, _bestRow, array.get(_bmNames, _bestRow - 1),
+             text_color=color.new(#FFD600,0), bgcolor=color.new(#FFD600,85), text_size=size.tiny)
+        table.cell(_bestTable, 1, _bestRow, str.tostring(math.round(_bestWR)) + "%",
+             text_color=color.new(#FFD600,0), bgcolor=color.new(#FFD600,85), text_size=size.tiny)
+
+    // Summary row
+    _summBestStr = _bestName != "" ?
+         "BEST: " + _bestName + " " + str.tostring(math.round(_bestWR)) + "%" :
+         "BEST: Insufficient data"
+    _summBestClr = _bestName != "" ? color.new(#FFD600,0) : C_TXT_DIM
+    table.cell(_bestTable, 0, 8, _summBestStr, text_color=_summBestClr, bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_bestTable, 1, 8, "",           text_color=C_TXT_DIM,    bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_bestTable, 2, 8, "",           text_color=C_TXT_DIM,    bgcolor=C_HEAD, text_size=size.tiny)
+
+// ============================================================
+// SECTION 20 — OBJECT CLEANUP (keep under 490 per type)
+// ============================================================
+
+while array.size(_boxes)  > 490
+    box.delete(array.shift(_boxes))
+while array.size(_lines)  > 490
+    line.delete(array.shift(_lines))
+while array.size(_labels) > 490
+    label.delete(array.shift(_labels))
+
+// ============================================================
+// SECTION 21 — plotshape (MUST be at global scope, Pine v6)
+// ============================================================
+
+// Model 1 — Classic Crabel
+plotshape(sig_m1_bull and i_m1_on and i_mode=="Multi-Model",
+     title="M1 Crabel — Long",  style=shape.triangleup,   location=location.belowbar,
+     color=i_colBull,  size=size.small,  text="M1",  textcolor=color.white)
+plotshape(sig_m1_bear and i_m1_on and i_mode=="Multi-Model",
+     title="M1 Crabel — Short", style=shape.triangledown, location=location.abovebar,
+     color=i_colBear,  size=size.small,  text="M1",  textcolor=color.white)
+
+// Model 3 — 5-Min Scalper
+plotshape(sig_m3_bull and i_m3_on and i_mode=="Multi-Model",
+     title="M3 5min — Long",  style=shape.triangleup,   location=location.belowbar,
+     color=color.new(#00BCD4,0), size=size.small, text="M3", textcolor=color.white)
+plotshape(sig_m3_bear and i_m3_on and i_mode=="Multi-Model",
+     title="M3 5min — Short", style=shape.triangledown, location=location.abovebar,
+     color=color.new(#00BCD4,0), size=size.small, text="M3", textcolor=color.white)
+
+// Model 4 — Standard 15-Min (larger arrow — reference model)
+plotshape(sig_m4_bull and i_m4_on and i_mode=="Multi-Model",
+     title="M4 15min — Long",  style=shape.arrowup,   location=location.belowbar,
+     color=i_colBull,  size=size.normal, text="M4", textcolor=color.white)
+plotshape(sig_m4_bear and i_m4_on and i_mode=="Multi-Model",
+     title="M4 15min — Short", style=shape.arrowdown, location=location.abovebar,
+     color=i_colBear,  size=size.normal, text="M4", textcolor=color.white)
+
+// Model 6 — FVG ORB
+plotshape(sig_m6_bull and i_m6_on and i_mode=="Multi-Model",
+     title="M6 FVG — Long",  style=shape.diamond, location=location.belowbar,
+     color=color.new(#E040FB,0), size=size.small, text="M6", textcolor=color.white)
+plotshape(sig_m6_bear and i_m6_on and i_mode=="Multi-Model",
+     title="M6 FVG — Short", style=shape.diamond, location=location.abovebar,
+     color=color.new(#E040FB,0), size=size.small, text="M6", textcolor=color.white)
+
+// Model 7 — Gold ORB
+plotshape(sig_m7_bull and i_m7_on and i_mode=="Multi-Model",
+     title="M7 Gold — Long",  style=shape.circle, location=location.belowbar,
+     color=color.new(#FFD600,0), size=size.small, text="M7", textcolor=color.white)
+plotshape(sig_m7_bear and i_m7_on and i_mode=="Multi-Model",
+     title="M7 Gold — Short", style=shape.circle, location=location.abovebar,
+     color=color.new(#FFD600,0), size=size.small, text="M7", textcolor=color.white)
+
+// Model 9 — Failed ORB Reversal
+plotshape(sig_m9_bull and i_m9_on and i_mode=="Multi-Model",
+     title="M9 FailORB — Long",  style=shape.xcross, location=location.belowbar,
+     color=i_colBull,  size=size.small, text="M9", textcolor=color.white)
+plotshape(sig_m9_bear and i_m9_on and i_mode=="Multi-Model",
+     title="M9 FailORB — Short", style=shape.xcross, location=location.abovebar,
+     color=i_colBear,  size=size.small, text="M9", textcolor=color.white)
+
+// Combined Mode
+plotshape(sig_comb_bull and i_mode=="Combined",
+     title="Combined — Long",  style=shape.arrowup,   location=location.belowbar,
+     color=i_colBull,  size=size.large, text="ORB+", textcolor=color.white)
+plotshape(sig_comb_bear and i_mode=="Combined",
+     title="Combined — Short", style=shape.arrowdown, location=location.abovebar,
+     color=i_colBear,  size=size.large, text="ORB+", textcolor=color.white)
+
+// ============================================================
+// SECTION 22 — ALERT CONDITIONS (global scope, Pine v6)
+// ============================================================
+
+alertcondition(sig_m1_bull, title="M1 Crabel — LONG",               message="ORB M1 Crabel LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m1_bear, title="M1 Crabel — SHORT",              message="ORB M1 Crabel SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m3_bull, title="M3 5min Scalper — LONG",         message="ORB M3 5min LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m3_bear, title="M3 5min Scalper — SHORT",        message="ORB M3 5min SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m4_bull, title="M4 Standard 15-Min — LONG",      message="ORB M4 15min LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m4_bear, title="M4 Standard 15-Min — SHORT",     message="ORB M4 15min SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m6_bull, title="M6 FVG ORB — LONG",              message="ORB M6 FVG LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m6_bear, title="M6 FVG ORB — SHORT",             message="ORB M6 FVG SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m7_bull, title="M7 Gold ORB — LONG",             message="ORB M7 Gold LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m7_bear, title="M7 Gold ORB — SHORT",            message="ORB M7 Gold SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m9_bull, title="M9 Failed ORB — LONG (Reversal)",message="ORB M9 FailORB LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m9_bear, title="M9 Failed ORB — SHORT (Reversal)",message="ORB M9 FailORB SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_comb_bull, title="Combined ORB+ — LONG",  message="ORB Combined LONG | {{ticker}} | {{close}}")
+alertcondition(sig_comb_bear, title="Combined ORB+ — SHORT", message="ORB Combined SHORT | {{ticker}} | {{close}}")
+
+// Catch-all
+alertcondition(
+     sig_m1_bull or sig_m3_bull or sig_m4_bull or sig_m6_bull or sig_m7_bull or sig_m9_bull or sig_comb_bull,
+     title="ANY ORB — LONG",  message="ORB Signal LONG | {{ticker}} | {{close}}")
+alertcondition(
+     sig_m1_bear or sig_m3_bear or sig_m4_bear or sig_m6_bear or sig_m7_bear or sig_m9_bear or sig_comb_bear,
+     title="ANY ORB — SHORT", message="ORB Signal SHORT | {{ticker}} | {{close}}")
+
+// ============================================================
+// SECTION 23 — DYNAMIC alert() (once per bar close, with context)
+// ============================================================
+
+if _refEdge or _fastEdge
+    if sig_m1_bull
+        alert("ORB M1 Crabel LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m1_bear
+        alert("ORB M1 Crabel SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m3_bull
+        alert("ORB M3 5min Scalper LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m3_bear
+        alert("ORB M3 5min Scalper SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m4_bull
+        alert("ORB M4 15min Standard LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m4_bear
+        alert("ORB M4 15min Standard SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m6_bull
+        alert("ORB M6 FVG LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m6_bear
+        alert("ORB M6 FVG SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m7_bull
+        alert("ORB M7 Gold LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m7_bear
+        alert("ORB M7 Gold SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m9_bull
+        alert("ORB M9 Failed ORB Bull Reversal LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_m9_bear
+        alert("ORB M9 Failed ORB Bear Reversal SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+    if sig_comb_bull
+        alert("ORB Combined LONG | " + syminfo.ticker +
+             " | Entry: " + str.tostring(close, format.mintick) +
+             " | Score: " + str.tostring(math.round(_confScore)) + "% [" + _confGrade + "]",
+             alert.freq_once_per_bar_close)
+    if sig_comb_bear
+        alert("ORB Combined SHORT | " + syminfo.ticker +
+             " | Entry: " + str.tostring(close, format.mintick) +
+             " | Score: " + str.tostring(math.round(_confScore)) + "% [" + _confGrade + "]",
+             alert.freq_once_per_bar_close)
+
+// ============================================================
+// SECTION 24 — BACKGROUND COLORING
+// ============================================================
+
+// Highlight OR windows
+bgcolor(in15MinOR ? color.new(#2196F3, 92) : na, title="15-Min OR Window Highlight")
+bgcolor(in5MinOR  ? color.new(#00BCD4, 88) : na, title="5-Min OR Window Highlight")
+
+// Color bars with abnormally high RVOL
+barcolor(rvol >= 2.0 ? color.new(#FF6F00, 0) : rvol >= 1.5 ? color.new(#F9A825, 30) : na,
+     title="High RVOL Bars")
+
+// ============================================================
+// END OF INDICATOR
+// ============================================================
