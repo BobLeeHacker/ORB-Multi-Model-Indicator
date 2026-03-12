@@ -1405,16 +1405,16 @@ if i_showDashboard and i_mode == "Multi-Model"
     orHStr = na(_or15H) ? "-" : str.tostring(_or15H, format.mintick)
     orLStr = na(_or15L) ? "-" : str.tostring(_or15L, format.mintick)
 
-    mNames = array.from("1.Crabel","3.5min","4.15min","6.FVG","7.Gold","9.FailORB")
-    mIdxs  = array.from(1, 3, 4, 6, 7, 9)
+    mNames = array.from("1.Crabel","3.5min","4.15min","6.FVG","7.Gold","9.FailORB","10.BDM")
+    mIdxs  = array.from(1, 3, 4, 6, 7, 9, 11)
 
     // Actual reference TF per model (driven by i_refTF_fast / i_refTF inputs):
     // M1 Crabel  → fast TF (i_refTF_fast, default 1m)
     // M3/M4/M6/M7/M9 → primary TF (i_refTF, default 5m)
     C_TF = color.new(#00BCD4, 0)  // cyan — distinct from signal colours
-    mTFs = array.from(i_refTF_fast, i_refTF, i_refTF, i_refTF, i_refTF, i_refTF)
+    mTFs = array.from(i_refTF_fast, i_refTF, i_refTF, i_refTF, i_refTF, i_refTF, i_refTF_fast + "/" + i_refTF)
 
-    for i = 0 to 5
+    for i = 0 to 6
         dSig    = array.get(_dashSignal, i)
         isBull  = dSig == 1
         isBear  = dSig == -1
@@ -1574,7 +1574,8 @@ if i_showTradeTable
                              _tMdl == 4  ? "M4 15min"  :
                              _tMdl == 6  ? "M6 FVG"    :
                              _tMdl == 7  ? "M7 Gold"   :
-                             _tMdl == 9  ? "M9 FailORB": "Combined"
+                             _tMdl == 9  ? "M9 FailORB":
+                             _tMdl == 11 ? "M10 BDM"   : "Combined"
                 _dirStr2 = _tDir2 == 1 ? "▲ LONG" : "▼ SHORT"
                 _dirClr  = _tDir2 == 1 ? i_colBull : i_colBear
                 _stStr   = _tSt == 0 ? "IN PROG" : _tSt == 1 ? "TP HIT" : "SL HIT"
@@ -1622,7 +1623,7 @@ if i_showTradeTable
 
 if i_showBestModel
     if na(_bestTable)
-        _bestTable := table.new(f_tablePos(i_bestModelPos), 3, 9,
+        _bestTable := table.new(f_tablePos(i_bestModelPos), 3, 10,
              bgcolor       = color.new(#1A1D26, 10),
              border_color  = color.new(color.gray, 50),
              border_width  = 1,
@@ -1634,14 +1635,14 @@ if i_showBestModel
     table.cell(_bestTable, 1, 0, "WIN%",   text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
     table.cell(_bestTable, 2, 0, "TRADES", text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
 
-    _bmNames  = array.from("M1 Crabel","M3 5min","M4 15min","M6 FVG","M7 Gold","M9 FailORB","Combined")
-    _bmIdxs   = array.from(1, 3, 4, 6, 7, 9, 10)
+    _bmNames  = array.from("M1 Crabel","M3 5min","M4 15min","M6 FVG","M7 Gold","M9 FailORB","M10 BDM","Combined")
+    _bmIdxs   = array.from(1, 3, 4, 6, 7, 9, 11, 10)
 
     _bestWR   = -1.0
     _bestName = ""
     _bestRow  = 0
 
-    for _bi = 0 to 6
+    for _bi = 0 to 7
         [_bW, _bL, _bT] = f_winRate(array.get(_bmIdxs, _bi))
         _bWR   = _bT >= 1 ? float(_bW) / float(_bT) * 100.0 : -1.0
         _wrStr2 = _bT >= 1 ? str.tostring(math.round(_bWR)) + "%" : "-"
@@ -1670,9 +1671,9 @@ if i_showBestModel
          "BEST: " + _bestName + " " + str.tostring(math.round(_bestWR)) + "%" :
          "BEST: Insufficient data"
     _summBestClr = _bestName != "" ? color.new(#FFD600,0) : C_TXT_DIM
-    table.cell(_bestTable, 0, 8, _summBestStr, text_color=_summBestClr, bgcolor=C_HEAD, text_size=size.tiny)
-    table.cell(_bestTable, 1, 8, "",           text_color=C_TXT_DIM,    bgcolor=C_HEAD, text_size=size.tiny)
-    table.cell(_bestTable, 2, 8, "",           text_color=C_TXT_DIM,    bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_bestTable, 0, 9, _summBestStr, text_color=_summBestClr, bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_bestTable, 1, 9, "",           text_color=C_TXT_DIM,    bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_bestTable, 2, 9, "",           text_color=C_TXT_DIM,    bgcolor=C_HEAD, text_size=size.tiny)
 
 // ============================================================
 // SECTION 20 — OBJECT CLEANUP (keep under 490 per type)
@@ -1736,6 +1737,14 @@ plotshape(sig_m9_bull and i_m9_on and i_mode=="Multi-Model",
 plotshape(sig_m9_bear and i_m9_on and i_mode=="Multi-Model",
      title="M9 FailORB — Short", style=shape.xcross, location=location.abovebar,
      color=i_colBear,  size=size.small, text="M9", textcolor=color.white)
+
+// Model 10 — BDM ORB
+plotshape(series=sig_m10_bull and i_m10_on and i_mode == "Multi-Model",
+     title="M10 BDM Long",  style=shape.triangleup,   location=location.belowbar,
+     color=i_colBull, size=size.small, text="M10", textcolor=color.white)
+plotshape(series=sig_m10_bear and i_m10_on and i_mode == "Multi-Model",
+     title="M10 BDM Short", style=shape.triangledown, location=location.abovebar,
+     color=i_colBear, size=size.small, text="M10", textcolor=color.white)
 
 // Combined Mode
 plotshape(sig_comb_bull and i_mode=="Combined",
