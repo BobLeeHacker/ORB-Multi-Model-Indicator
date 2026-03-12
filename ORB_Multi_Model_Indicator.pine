@@ -37,7 +37,7 @@ i_m6_on = input.bool(false, "Model 6 — FVG ORB",             group="Model Togg
 i_m7_on = input.bool(true,  "Model 7 — Gold ORB",            group="Model Toggles")
 i_m9_on = input.bool(false, "Model 9 — Failed ORB Reversal", group="Model Toggles",
      tooltip="Disabled by default — CSV backtest shows 25–67% WR (inconsistent across pairs/TFs).")
-i_m10_on = input.bool(true, "Model 10 — BDM ORB",            group="Model Toggles",
+i_m10_on = input.bool(false, "Model 10 — BDM ORB",            group="Model Toggles",
      tooltip="Big Daddy Max's 3-phase ORB: 5-min breakout → 1-min retest → 1-min bounce entry.")
 
 // ── Model 1 (Crabel) ─────────────────────────────────────────
@@ -229,12 +229,12 @@ var int   _bdmBullWaitBars   = 0       // fastEdge count since phase start
 var line  _bdmBullRetestLine = na      // visual retest zone line
 
 // M10 BDM ORB — Phase state (bear)
-var bool  _bdmBearBreak      = false
-var bool  _bdmBearRetest     = false
-var bool  _bdmFiredBear      = false
-var float _bdmBearBreakLevel = na
-var int   _bdmBearWaitBars   = 0
-var line  _bdmBearRetestLine = na
+var bool  _bdmBearBreak      = false   // Phase 1 confirmed
+var bool  _bdmBearRetest     = false   // Phase 2 retest touched
+var bool  _bdmFiredBear      = false   // one-signal-per-day guard
+var float _bdmBearBreakLevel = na      // OR level broken (Phase 1)
+var int   _bdmBearWaitBars   = 0       // fastEdge count since phase start
+var line  _bdmBearRetestLine = na      // visual retest zone line
 
 // Signal flags — reset each bar, read by plotshape + alertcondition
 var bool sig_m1_bull   = false
@@ -446,12 +446,20 @@ if _newDay
     _m7FiredBull := false
     _m7FiredBear := false
     // M10 BDM ORB reset
-    _bdmBullBreak      := false  ;  _bdmBullRetest  := false  ;  _bdmFiredBull := false
-    _bdmBullBreakLevel := na     ;  _bdmBullWaitBars := 0
-    line.delete(_bdmBullRetestLine)  ;  _bdmBullRetestLine := na
-    _bdmBearBreak      := false  ;  _bdmBearRetest  := false  ;  _bdmFiredBear := false
-    _bdmBearBreakLevel := na     ;  _bdmBearWaitBars := 0
-    line.delete(_bdmBearRetestLine)  ;  _bdmBearRetestLine := na
+    _bdmBullBreak      := false
+    _bdmBullRetest     := false
+    _bdmFiredBull      := false
+    _bdmBullBreakLevel := na
+    _bdmBullWaitBars   := 0
+    line.delete(_bdmBullRetestLine)
+    _bdmBullRetestLine := na
+    _bdmBearBreak      := false
+    _bdmBearRetest     := false
+    _bdmFiredBear      := false
+    _bdmBearBreakLevel := na
+    _bdmBearWaitBars   := 0
+    line.delete(_bdmBearRetestLine)
+    _bdmBearRetestLine := na
 
     // Reset Combined pending state
     _combLongFired  := false
@@ -584,7 +592,7 @@ f_drawLabel(modelName, entryP, slP, tpP, isBull, yMult = 0.6) =>
              size      = size.small))
 
 // Register a new trade: push to tracking arrays + update per-model last-signal state
-// modelIdx: 1-9 for M1-M9, 10 for Combined (array index = modelIdx - 1)
+// modelIdx: 1-9 for M1-M9, 10 for Combined, 11 for M10 BDM (array index = modelIdx - 1)
 f_registerTrade(modelIdx, entryP, slP, tpP, isBull) =>
     arrIdx = modelIdx - 1
     array.push(_trEntry,  entryP)
