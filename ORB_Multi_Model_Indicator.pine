@@ -287,6 +287,13 @@ var int[]   _dashSignal = array.new<int>(11, 0)
 var int[]   _mWins   = array.new<int>(11, 0)
 var int[]   _mLosses = array.new<int>(11, 0)
 
+// Per-bar agreement counters — reset every bar, incremented at model call sites
+var int _agreeCountBull = 0
+var int _agreeCountBear = 0
+
+// Per-model confluence score (0–100) — same 11-slot indexing as _lastEntry
+var int[] _lastScore = array.new<int>(11, 0)
+
 // Day bias
 var string  _dayBias   = "NEUTRAL"
 var float   _biasScore = 0.0
@@ -352,7 +359,7 @@ _refEdge = ref_time != ref_time[1]
 
 // ── Fast Reference TF data (M1 Crabel + Combined mode) ───────────────────────
 // Separate request.security block on i_refTF_fast (default "1").
-// RSI omitted — only M4 uses RSI and it stays on primary TF.
+// RSI included for f_modelScore (M1 uses fast TF for scoring).
 fast_close     = request.security(syminfo.tickerid, i_refTF_fast, close,                                lookahead=barmerge.lookahead_off)
 fast_close1    = request.security(syminfo.tickerid, i_refTF_fast, close[1],                             lookahead=barmerge.lookahead_off)
 fast_high      = request.security(syminfo.tickerid, i_refTF_fast, high,                                 lookahead=barmerge.lookahead_off)
@@ -360,6 +367,7 @@ fast_low       = request.security(syminfo.tickerid, i_refTF_fast, low,          
 fast_atr14     = request.security(syminfo.tickerid, i_refTF_fast, ta.atr(i_atrLen),                     lookahead=barmerge.lookahead_off)
 fast_vwap      = request.security(syminfo.tickerid, i_refTF_fast, ta.vwap(hlc3),                        lookahead=barmerge.lookahead_off)
 fast_rvol      = request.security(syminfo.tickerid, i_refTF_fast, volume / ta.sma(volume, i_volAvgLen), lookahead=barmerge.lookahead_off)
+fast_rsi14     = request.security(syminfo.tickerid, i_refTF_fast, ta.rsi(close, 14),                    lookahead=barmerge.lookahead_off)
 fast_bullBar   = request.security(syminfo.tickerid, i_refTF_fast, close > open,                         lookahead=barmerge.lookahead_off)
 fast_bearBar   = request.security(syminfo.tickerid, i_refTF_fast, close < open,                         lookahead=barmerge.lookahead_off)
 fast_time      = request.security(syminfo.tickerid, i_refTF_fast, time,                                 lookahead=barmerge.lookahead_off)
@@ -435,6 +443,7 @@ if _newDay
     // Reset persistent dashboard signal state for new day
     for _ri = 0 to 10
         array.set(_dashSignal, _ri, 0)
+        array.set(_lastScore,  _ri, 0)
 
     // Reset per-day fired flags
     _m1FiredBull := false
@@ -470,6 +479,10 @@ if _newDay
     if not na(_combPendShort)
         label.delete(_combPendShort)
         _combPendShort := na
+
+// Reset per-bar agreement counters
+_agreeCountBull := 0
+_agreeCountBear := 0
 
 // Reset all signal flags each bar
 sig_m1_bull   := false
@@ -658,6 +671,19 @@ if _or15Complete and not na(_orHLineActive)
         line.set_x2(_orMidLineActive, bar_index)
     if not na(_orBoxActive)
         box.set_right(_orBoxActive, bar_index)
+
+// ── Per-Model Confluence Score ────────────────────────────────
+// Pure function — reads params + global htfEma20/htfEma50. Returns 0–100.
+// _rc=close, _rvol=rel-volume, _rvwap=vwap, _rsi=RSI14 — all from model's own TF.
+f_modelScore(isBull, _rc, _rvol, _rvwap, _rsi) =>
+    vwapPts  = (isBull ? _rc > _rvwap : _rc < _rvwap) ? 25 : 0
+    volPts   = _rvol >= 2.0 ? 25 : _rvol >= 1.5 ? 18 : _rvol >= 1.2 ? 10 : 0
+    htfPts   = isBull ? (htfEma20 > htfEma50 ? 20 : 0) : (htfEma20 < htfEma50 ? 20 : 0)
+    rsiPts   = isBull ? (_rsi >= 45 and _rsi <= 70 ? 15 : 0)
+                      : (_rsi >= 30 and _rsi <= 55 ? 15 : 0)
+    agreePts = isBull ? math.max(math.min(_agreeCountBull - 1, 3), 0) * 10
+                      : math.max(math.min(_agreeCountBear - 1, 3), 0) * 10
+    math.min(vwapPts + volPts + htfPts + rsiPts + agreePts, 100)
 
 // ============================================================
 // SECTION 12 — MODEL FUNCTIONS (stateless: M1, M3, M4, M7)
@@ -1382,7 +1408,7 @@ f_winRate(modelIdx) =>
 // ── Multi-Model Dashboard ─────────────────────────────────────
 if i_showDashboard and i_mode == "Multi-Model"
     if na(_dashTable)
-        _dashTable := table.new(f_tablePos(i_dashPos), 10, 9,
+        _dashTable := table.new(f_tablePos(i_dashPos), 10, 10,
              bgcolor       = color.new(#1A1D26, 10),
              border_color  = color.new(color.gray, 50),
              border_width  = 1,
@@ -1499,40 +1525,40 @@ if i_showDashboard and i_mode == "Combined"
     table.cell(_checkTable, 2, 9, "Grade: " + gradeStr,                   text_color=gradeClr,bgcolor=C_HEAD, text_size=size.small)
     table.cell(_checkTable, 3, 9, armedStr,                               text_color=gradeClr,bgcolor=C_HEAD, text_size=size.small)
 
-// ── RVOL display row (row 10) ─────────────────────────────────
+// ── RVOL display row (row 8) ─────────────────────────────────
 if i_showDashboard and i_mode == "Multi-Model" and not na(_dashTable)
     rvolStr = str.tostring(math.round(ref_rvol * 100) / 100.0)
     rvolClr = ref_rvol >= 2.0 ? color.new(#FF6F00,0) : ref_rvol >= 1.5 ? color.new(#FF9800,0) : C_TXT_DIM
-    table.cell(_dashTable, 0, 7, "RVOL: " + rvolStr, text_color=rvolClr,   bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 1, 7, "ATR: "  + str.tostring(math.round(ref_atr14 * 100) / 100.0),
+    table.cell(_dashTable, 0, 8, "RVOL: " + rvolStr, text_color=rvolClr,   bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 1, 8, "ATR: "  + str.tostring(math.round(ref_atr14 * 100) / 100.0),
          text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 2, 7, "VWAP: " + str.tostring(ref_vwap, format.mintick),
+    table.cell(_dashTable, 2, 8, "VWAP: " + str.tostring(ref_vwap, format.mintick),
          text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 3, 7, isNR7 ? "NR7" : isNR4 ? "NR4" : "-",
+    table.cell(_dashTable, 3, 8, isNR7 ? "NR7" : isNR4 ? "NR4" : "-",
          text_color=isNR7 or isNR4 ? color.new(#FF9800,0) : C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 4, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 5, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 6, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 7, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 8, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 9, 7, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 4, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 5, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 6, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 7, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 8, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 9, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
 
-    // Day Bias row (row 8)
+    // Day Bias row (row 9)
     biasClr = _dayBias == "BULLISH" ? color.new(#00E676,0) :
                _dayBias == "BEARISH" ? color.new(#FF1744,0) : C_TXT_DIM
     biasBG  = _dayBias == "BULLISH" ? color.new(#00E676,85) :
                _dayBias == "BEARISH" ? color.new(#FF1744,85) : C_NONE
     biasScoreStr = str.tostring(math.round(math.abs(_biasScore))) + "%"
-    table.cell(_dashTable, 0, 8, "DAY BIAS",        text_color=C_TXT,    bgcolor=C_HEAD, text_size=size.tiny)
-    table.cell(_dashTable, 1, 8, _dayBias,           text_color=biasClr,  bgcolor=biasBG, text_size=size.tiny)
-    table.cell(_dashTable, 2, 8, biasScoreStr,        text_color=biasClr,  bgcolor=biasBG, text_size=size.tiny)
-    table.cell(_dashTable, 3, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 4, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 5, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 6, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 7, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 8, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 9, 8, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 0, 9, "DAY BIAS",        text_color=C_TXT,    bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_dashTable, 1, 9, _dayBias,           text_color=biasClr,  bgcolor=biasBG, text_size=size.tiny)
+    table.cell(_dashTable, 2, 9, biasScoreStr,        text_color=biasClr,  bgcolor=biasBG, text_size=size.tiny)
+    table.cell(_dashTable, 3, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 4, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 5, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 6, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 7, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 8, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 9, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
 
 // ============================================================
 // SECTION 19B — ENTRIES / TRADES TABLE (today's trades)
