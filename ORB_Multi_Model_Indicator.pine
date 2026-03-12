@@ -927,11 +927,9 @@ if i_m9_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and 
 // ============================================================
 
 if i_m10_on and i_mode == "Multi-Model" and _or15Complete
-    pastCutoff10 = hour(time, NY_TZ) >= i_timeCutoff
-
     // ── PHASE 1: 5-min breakout confirmation ───────────────────
     // Gate: _refEdge ensures we only fire on a new 5-min bar close
-    if _refEdge and not pastCutoff10
+    if _refEdge and not pastCutoff
         // Bull: 5-min close crosses above OR high
         if ref_close > _or15H and ref_close1 <= _or15H and not _bdmFiredBull and not _bdmBullBreak
             _bdmBullBreak      := true
@@ -990,7 +988,7 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
 
             // Phase 3: bounce entry (1-min close back above OR high after retest)
             else
-                if fast_close > _bdmBullBreakLevel and not pastCutoff10
+                if fast_close > _bdmBullBreakLevel and not pastCutoff
                     entryP10 = fast_close
                     slP10    = _bdmBullBreakLevel - ref_atr14 * i_bdm_slMult
                     tpP10    = entryP10 + (entryP10 - slP10) * i_bdm_rratio
@@ -1037,10 +1035,10 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
 
             // Phase 3: bounce entry
             else
-                if fast_close < _bdmBearBreakLevel and not pastCutoff10
+                if fast_close < _bdmBearBreakLevel and not pastCutoff
                     entryP10b = fast_close
                     slP10b    = _bdmBearBreakLevel + ref_atr14 * i_bdm_slMult
-                    tpP10b    = entryP10b - (slP10b - entryP10b) * i_bdm_rratio
+                    tpP10b    = entryP10b - (slP10b - entryP10b) * i_bdm_rratio   // slP10b > entryP10b for shorts, so this yields a price below entry
                     sig_m10_bear   := true
                     _bdmFiredBear  := true
                     f_registerTrade(11, entryP10b, slP10b, tpP10b, false)
