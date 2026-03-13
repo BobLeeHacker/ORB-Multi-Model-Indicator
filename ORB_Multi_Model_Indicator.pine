@@ -13,13 +13,17 @@ indicator("ORB Multi-Model Indicator", shorttitle="ORB-MMI", overlay=true,
 
 // ── Mode ────────────────────────────────────────────────────
 var string TT_MODE = "Multi-Model: each enabled model fires independently.\nCombined: single signal scored by confidence factors."
-i_mode = input.string("Multi-Model", "Indicator Mode", options=["Multi-Model", "Combined"], group="Mode", tooltip=TT_MODE)
+i_comb_on = input.bool(true, "Enable Combined Signal", group="Mode", tooltip="When on, the Combined confidence-scored signal runs alongside all individual models. No need to switch modes.")
 
 // ── Session ─────────────────────────────────────────────────
 i_sessionOpen  = input.session("0930-1600", "NY Session Window", group="Session",
      tooltip="Full NY trading session for signal gating.")
 i_timeCutoff   = input.int(12, "Signal Cutoff Hour (EST)", minval=10, maxval=15, group="Session",
      tooltip="No new signals after this hour (default noon).")
+i_orWidthFilter = input.bool(false, "Enable OR Width Filter", group="Session",
+     tooltip="When enabled: skips all signals if the OR range exceeds the multiplier below.\nUseful for filtering out wide, noisy ORs on news/high-volatility days.\nLeave OFF until per-pair tuning — the right threshold varies by instrument.")
+i_orWidthMaxATR = input.float(1.5, "  OR Max Width (× ATR14)", minval=0.5, maxval=5.0, step=0.1, group="Session",
+     tooltip="Maximum OR range as a multiple of ATR14. Only active when OR Width Filter is enabled.\nStart with 2.0–3.0 and tighten per instrument.")
 i_refTF        = input.timeframe("5", "Primary Reference TF (M3/M4/M6/M7/M9)", group="Session",
      tooltip="Reference TF for M3, M4, M6, M7, M9. CSV data: 5m optimal for these models.\nRun the indicator on any chart TF — entries, SL/TP and win rates stay identical.")
 i_refTF_fast   = input.timeframe("1", "Fast Reference TF (M1, Combined)", group="Session",
@@ -108,12 +112,39 @@ i_minScore = input.int(60, "Min Confidence Score to Signal (%)", group="Combined
 i_htfTF = input.timeframe("60", "HTF Timeframe for Trend", group="HTF Settings",
      tooltip="Used for trend alignment in Combined mode and Model 4.")
 
+// ── DXY Settings ──────────────────────────────────────────────
+i_dxy_on        = input.bool(false, "Enable DXY Correlation Filter",
+    group="DXY Settings",
+    tooltip="Enable for XAUUSD/Gold charts only. Adds inverse DXY factor to Combined mode scoring.")
+i_dxy_sym       = input.string("DXY", "DXY Symbol",
+    group="DXY Settings",
+    tooltip="TradingView symbol for the US Dollar Index. Try 'TVC:DXY' or 'CAPITALCOM:DXY' if default unavailable.")
+i_dxy_tf        = input.timeframe("60", "DXY Timeframe",
+    group="DXY Settings",
+    tooltip="Timeframe for DXY EMA trend read. Default 60 (hourly) gives stable macro bias.")
+i_wDXY          = input.int(15, "Weight: DXY Inverse Correlation (%)",
+    group="DXY Settings", minval=0, maxval=100,
+    tooltip="Weight of DXY factor in Combined mode confidence score. Only active when DXY filter is on.")
+i_dxy_hard_gate = input.bool(false, "DXY Hard Gate (suppress Combined signals when DXY opposes)",
+    group="DXY Settings",
+    tooltip="When enabled: Combined signals are suppressed if DXY direction opposes Gold direction.")
+i_dxy_gate_models = input.bool(false, "DXY Hard Gate for All Models (M1/M3/M4/M6/M7/M9/M10)",
+    group="DXY Settings",
+    tooltip="When enabled: all individual model signals are also suppressed if DXY direction opposes Gold direction.")
+
+// ── News / Events ─────────────────────────────────────────────
+i_news_on = input.bool(false, "Show CPI/NFP on Day Bias Label (Gold charts only)",
+    group="News / Events",
+    tooltip="Displays latest US CPI and NFP readings in the Day Bias label with Gold market implications.\nData from TradingView ECONOMICS series — updates within minutes of official release, not real-time.\nAuto-disabled on non-Gold charts.")
+
 // ── Visuals ───────────────────────────────────────────────────
 i_showBox       = input.bool(true, "Show OR Range Box",     group="Visuals")
 i_showMidLine   = input.bool(true, "Show OR Midline",       group="Visuals")
 i_showSLTP      = input.bool(true, "Show SL/TP Lines",      group="Visuals")
 i_showLabels    = input.bool(true, "Show Signal Labels",    group="Visuals")
 i_showDashboard = input.bool(true, "Show Dashboard Table",  group="Visuals")
+i_showPrimeWindow = input.bool(true, "Highlight Prime Window (9:30–10:00 NY)", group="Visuals",
+     tooltip="Subtle gold background on the first 30 min of NY session — highest-probability ORB window.\nSignal labels show ★ when fired during this window.")
 i_dashPos       = input.string("Top Right", "Dashboard Position",
      options=["Top Right","Top Left","Bottom Right","Bottom Left"], group="Visuals")
 i_showTradeTable = input.bool(true,            "Show Entries Table",         group="Visuals")
@@ -122,7 +153,7 @@ i_tradeTablePos  = input.string("Bottom Right","Entries Table Position",
      options=["Top Right","Top Left","Bottom Right","Bottom Left"], group="Visuals")
 i_bestModelPos   = input.string("Bottom Left", "Best Model Table Position",
      options=["Top Right","Top Left","Bottom Right","Bottom Left"], group="Visuals")
-i_maxTrades      = input.int(50, "Max Trades in Memory", group="Visuals", minval=20, maxval=200)
+i_maxTrades      = input.int(200, "Max Trades in Memory", group="Visuals", minval=20, maxval=1000)
 
 i_colBull   = input.color(color.new(#00E676, 0),  "Bull Signal Color", group="Visuals")
 i_colBear   = input.color(color.new(#FF1744, 0),  "Bear Signal Color", group="Visuals")
@@ -130,6 +161,15 @@ i_colOR     = input.color(color.new(#2196F3, 75), "OR Box Fill",       group="Vi
 i_colORLine = input.color(color.new(#2196F3, 0),  "OR Line Color",     group="Visuals")
 i_colSL     = input.color(color.new(#FF5252, 0),  "SL Line Color",     group="Visuals")
 i_colTP     = input.color(color.new(#69F0AE, 0),  "TP Line Color",     group="Visuals")
+
+// ── Dashboard text styling ────────────────────────────────────
+i_dashTextSize = input.string("Small", "Dashboard Text Size",
+     options=["Tiny","Small","Normal"], group="Visuals")
+i_colTxtMain   = input.color(color.white,             "Table: Main Text",        group="Visuals")
+i_colTxtDim    = input.color(color.new(#90CAF9, 0),   "Table: Dim Text (OR levels)", group="Visuals")
+i_colWinHigh   = input.color(color.new(#00E676, 0),   "Table: Win% High (≥60%)", group="Visuals")
+i_colWinMid    = input.color(color.new(#FFD54F, 0),   "Table: Win% Mid (50–60%)", group="Visuals")
+i_colWinLow    = input.color(color.new(#FF6E6E, 0),   "Table: Win% Low (<50%)",  group="Visuals")
 
 // ── Risk ──────────────────────────────────────────────────────
 i_atrLen    = input.int(14,   "ATR Length",             group="Risk", minval=5, maxval=50)
@@ -156,6 +196,19 @@ f_orEndTime(durationMins) =>
     "0930-" + hStr + mStr
 
 crabelSessionStr = f_orEndTime(i_crabelMins)
+
+// ── Pip/point size — auto-detected per instrument ─────────────
+// Priority: Gold → Silver → JPY → standard forex → everything else (indices, CFDs, futures, crypto)
+// Using syminfo.type for forex detection avoids the mintick ambiguity on CFD data feeds.
+_pipSize =
+     str.upper(syminfo.basecurrency) == "XAU" or
+     str.contains(str.upper(syminfo.ticker), "XAU") or
+     str.contains(str.upper(syminfo.ticker), "GOLD")                                  ? 0.1    :  // Gold (XAUUSD, XAUEUR, GOLD…)
+     str.upper(syminfo.basecurrency) == "XAG" or
+     str.contains(str.upper(syminfo.ticker), "XAG")                                   ? 0.001  :  // Silver
+     str.upper(syminfo.basecurrency) == "JPY" or str.upper(syminfo.currency) == "JPY" ? 0.01   :  // JPY pairs
+     syminfo.type == "forex"                                                           ? 0.0001 :  // All other forex (EUR/USD, GBP/USD…)
+     1.0                                                                                           // Indices, futures, CFDs, crypto — 1 point
 
 // ============================================================
 // SECTION 3 — GLOBAL STATE (var)
@@ -193,6 +246,8 @@ var bool _m9BullBreak   = false
 var bool _m9BearBreak   = false
 var int  _m9BreakBar    = 0
 var int  _m9InsideCount = 0
+var bool _m9FiredBull   = false  // once-per-day guard
+var bool _m9FiredBear   = false  // once-per-day guard
 
 // Previous day OHLC
 var float _pdHigh  = na
@@ -206,6 +261,10 @@ var float[] _dailyRanges = array.new<float>()
 var box[]   _boxes  = array.new<box>()
 var line[]  _lines  = array.new<line>()
 var label[] _labels = array.new<label>()
+
+// Entry-zone box tracking (parallel to trade arrays)
+var box[] _trBoxTP = array.new<box>()   // TP zone box per trade
+var box[] _trBoxSL = array.new<box>()   // SL zone box per trade
 
 // OR box drawn flag (per day)
 var bool _or15BoxDrawn = false
@@ -293,6 +352,8 @@ var int[]   _dashSignal = array.new<int>(11, 0)
 // These accumulate permanently — never trimmed, never cross-contaminated by other models
 var int[]   _mWins   = array.new<int>(11, 0)
 var int[]   _mLosses = array.new<int>(11, 0)
+// Per-model current streak: positive = win streak, negative = loss streak
+var int[]   _mStreak = array.new<int>(11, 0)
 
 // Per-bar agreement counters — reset every bar, incremented at model call sites
 var int _agreeCountBull = 0
@@ -309,14 +370,18 @@ var float   _biasScore = 0.0
 var label   _biasChartLabel = na
 
 // Combined mode pending setup labels (live limit-order preview)
-var label   _combPendLong   = na
-var label   _combPendShort  = na
 var bool    _combLongFired  = false
 var bool    _combShortFired = false
 
 // Entries + Best Model tables
 var table   _tradeTable = na
 var table   _bestTable  = na
+
+// Economic event "released today" flags + persistent MoM direction
+var bool  _cpiToday   = false   // reset daily — true if CPI released this session
+var bool  _nfpToday   = false   // reset daily — true if NFP released this session
+var float _lastCpiMoM = 0.0     // NOT reset daily — direction of last CPI reading
+var float _lastNfpMoM = 0.0     // NOT reset daily — direction of last NFP reading
 
 // ============================================================
 // SECTION 4 — TECHNICAL INDICATORS (global scope)
@@ -381,6 +446,43 @@ fast_time      = request.security(syminfo.tickerid, i_refTF_fast, time,         
 
 _fastEdge = fast_time != fast_time[1]
 
+// ── DXY data — inverse correlation scoring ───────────────────
+dxy_close = request.security(i_dxy_sym, i_dxy_tf, close,             lookahead=barmerge.lookahead_off)
+dxy_ema20 = request.security(i_dxy_sym, i_dxy_tf, ta.ema(close, 20), lookahead=barmerge.lookahead_off)
+dxy_ema50 = request.security(i_dxy_sym, i_dxy_tf, ta.ema(close, 50), lookahead=barmerge.lookahead_off)
+
+// ── Economic indicators — CPI & NFP for Gold market context ──
+// Always run (Pine v6 requirement); i_news_on + _isGoldChart gate display only.
+econ_cpi = request.security("ECONOMICS:USCPI", "D", close, lookahead=barmerge.lookahead_off)
+econ_nfp = request.security("ECONOMICS:USNFP", "D", close, lookahead=barmerge.lookahead_off)
+
+// Auto-disable DXY on non-Gold charts (XAU* pairs and GOLD ticker variants)
+_isGoldChart = syminfo.basecurrency == "XAU"
+             or str.contains(str.upper(syminfo.ticker), "XAU")
+             or str.contains(str.upper(syminfo.ticker), "GOLD")
+_dxyActive   = i_dxy_on and _isGoldChart
+
+// Economic release detection — ta.change() is non-zero only on the bar the value updates
+_cpiMoM = ta.change(econ_cpi)
+_nfpMoM = ta.change(econ_nfp)
+if not na(_cpiMoM) and _cpiMoM != 0
+    _cpiToday   := true
+    _lastCpiMoM := _cpiMoM
+if not na(_nfpMoM) and _nfpMoM != 0
+    _nfpToday   := true
+    _lastNfpMoM := _nfpMoM
+
+// OR width gates — true = OR is narrow enough to trade, false = skip all signals
+// Pass-through when filter is disabled, or when ATR/OR levels are not yet available
+_or5WidthOK      = not i_orWidthFilter or na(ref_atr14) or na(_or5H)      or na(_or5L)      or (_or5H      - _or5L)      <= i_orWidthMaxATR * ref_atr14
+_or15WidthOK     = not i_orWidthFilter or na(ref_atr14) or na(_or15H)     or na(_or15L)     or (_or15H     - _or15L)     <= i_orWidthMaxATR * ref_atr14
+_orCrabelWidthOK = not i_orWidthFilter or na(ref_atr14) or na(_orCrabelH) or na(_orCrabelL) or (_orCrabelH - _orCrabelL) <= i_orWidthMaxATR * ref_atr14
+
+// Gate booleans for all-model DXY filter — true = allow signal, false = suppress
+// na-safe: pass-through when DXY data unavailable
+_dxyBullGate = not _dxyActive or not i_dxy_gate_models or na(dxy_close) or na(dxy_ema20) or dxy_close < dxy_ema20
+_dxyBearGate = not _dxyActive or not i_dxy_gate_models or na(dxy_close) or na(dxy_ema20) or dxy_close > dxy_ema20
+
 // ============================================================
 // SECTION 5 — SESSION HELPERS
 // ============================================================
@@ -395,6 +497,9 @@ pastCutoff  = nyHour >= i_timeCutoff
 in5MinOR   = f_inSession(OR_5MIN_STR)
 in15MinOR  = f_inSession(OR_15MIN_STR)
 inCrabelOR = f_inSession(crabelSessionStr)
+
+// Prime window: first 30 min of NY session (9:30–10:00 EST) — highest-probability ORB window
+_primeWindow = inNYSession and nyHour == 9
 
 // ============================================================
 // SECTION 6 — DAY DETECTION & DAILY RESET
@@ -443,6 +548,8 @@ if _newDay
     _m9BearBreak  := false
     _m9BreakBar   := 0
     _m9InsideCount := 0
+    _m9FiredBull  := false
+    _m9FiredBear  := false
 
     // Reset OR box drawn flag
     _or15BoxDrawn := false
@@ -480,12 +587,10 @@ if _newDay
     // Reset Combined pending state
     _combLongFired  := false
     _combShortFired := false
-    if not na(_combPendLong)
-        label.delete(_combPendLong)
-        _combPendLong := na
-    if not na(_combPendShort)
-        label.delete(_combPendShort)
-        _combPendShort := na
+
+    // Reset economic event "released today" flags
+    _cpiToday := false
+    _nfpToday := false
 
 // Reset per-bar agreement counters
 _agreeCountBull := 0
@@ -593,19 +698,36 @@ isNR4 = f_isNR4()
 
 f_drawSLTP(entryP, slP, tpP, clrEntry, clrSL, clrTP) =>
     if i_showSLTP
-        array.push(_lines, line.new(bar_index, entryP, bar_index+20, entryP, color=clrEntry, style=line.style_dashed, width=1))
-        array.push(_lines, line.new(bar_index, slP,    bar_index+20, slP,    color=clrSL,    style=line.style_dashed, width=1))
-        array.push(_lines, line.new(bar_index, tpP,    bar_index+20, tpP,    color=clrTP,    style=line.style_dashed, width=1))
+        // TP zone: entry → TP (profit zone, semi-transparent)
+        _tpBox = box.new(bar_index, tpP, bar_index + 20, entryP,
+             bgcolor=color.new(clrTP, 80), border_color=clrTP, border_width=1)
+        // SL zone: entry → SL (risk zone, semi-transparent)
+        _slBox = box.new(bar_index, entryP, bar_index + 20, slP,
+             bgcolor=color.new(clrSL, 80), border_color=clrSL, border_width=1)
+        array.push(_boxes, _tpBox)
+        array.push(_boxes, _slBox)
+        array.push(_trBoxTP, _tpBox)
+        array.push(_trBoxSL, _slBox)
+        // Solid entry line
+        array.push(_lines, line.new(bar_index, entryP, bar_index + 20, entryP,
+             color=clrEntry, style=line.style_solid, width=2))
+    else
+        array.push(_trBoxTP, box(na))
+        array.push(_trBoxSL, box(na))
 
 // yMult controls vertical offset so labels from different models don't overlap on the same bar
-f_drawLabel(modelName, entryP, slP, tpP, isBull, yMult = 0.6) =>
+f_drawLabel(modelName, entryP, slP, tpP, isBull, yMult = 0.6, _score = 0.0) =>
     if i_showLabels
-        yOff = isBull ? low - atr14 * yMult : high + atr14 * yMult
+        yOff      = isBull ? low - atr14 * yMult : high + atr14 * yMult
+        _grade    = _score >= 80 ? "A" : _score >= 60 ? "B" : _score >= 40 ? "C" : "F"
+        scoreLine = _score > 0 ? "\nScore: " + str.tostring(math.round(_score)) + "% [" + _grade + "]" : ""
+        _prefix   = _primeWindow ? "★ " : ""
         array.push(_labels, label.new(bar_index, yOff,
-             text      = modelName +
+             text      = _prefix + modelName +
                          "\nEntry: " + str.tostring(entryP, format.mintick) +
                          "\nSL: "    + str.tostring(slP,    format.mintick) +
-                         "\nTP: "    + str.tostring(tpP,    format.mintick),
+                         "\nTP: "    + str.tostring(tpP,    format.mintick) +
+                         scoreLine,
              color     = isBull ? i_colBull : i_colBear,
              style     = isBull ? label.style_label_up : label.style_label_down,
              textcolor = color.white,
@@ -668,6 +790,10 @@ if _or15Complete and not _or15BoxDrawn and not na(_or15H) and not na(_or15L)
     array.push(_labels, label.new(bar_index, _or15L,
          text="OR L: "+str.tostring(_or15L, format.mintick),
          color=i_colORLine, style=label.style_label_left, textcolor=color.white, size=size.tiny))
+    if i_showMidLine
+        array.push(_labels, label.new(bar_index, orMid,
+             text="OR Mid: "+str.tostring(orMid, format.mintick),
+             color=color.new(i_colORLine, 50), style=label.style_label_left, textcolor=color.white, size=size.tiny))
 
 // Extend active OR lines to the current bar every bar they're alive
 // When _or15Complete resets on a new day, this block doesn't run → lines freeze at day's last bar
@@ -702,7 +828,7 @@ f_modelScore(isBull, _rc, _rvol, _rvwap, _rsi) =>
 f_model1(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol) =>
     bull = false
     bear = false
-    if _orCrabelComplete and not na(_orCrabelH) and not na(_orCrabelL)
+    if _orCrabelComplete and not na(_orCrabelH) and not na(_orCrabelL) and _orCrabelWidthOK
         if _edge and not pastCutoff and inNYSession
             nrPass = i_m1_nr7 ? (isNR7 or isNR4) : true
             volOk  = i_m1_volMult <= 0 or _rvol >= i_m1_volMult
@@ -716,7 +842,7 @@ f_model1(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol) =>
                     slP     = entryP - slDist
                     tpP     = entryP + slDist * i_m1_rratio
                     f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
-                    f_drawLabel("M1 Crabel", entryP, slP, tpP, true, 0.6)
+                    f_drawLabel("M1 Crabel", entryP, slP, tpP, true, 0.6, f_modelScore(true,  _rc, _rvol, fast_vwap, fast_rsi14))
                     f_registerTrade(1, entryP, slP, tpP, true)
                 // Bear breakdown
                 if _rc < _orCrabelL and _rc1 >= _orCrabelL and not _firedBear
@@ -725,7 +851,7 @@ f_model1(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol) =>
                     slP     = entryP + slDist
                     tpP     = entryP - slDist * i_m1_rratio
                     f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
-                    f_drawLabel("M1 Crabel", entryP, slP, tpP, false, 0.6)
+                    f_drawLabel("M1 Crabel", entryP, slP, tpP, false, 0.6, f_modelScore(false, _rc, _rvol, fast_vwap, fast_rsi14))
                     f_registerTrade(1, entryP, slP, tpP, false)
     [bull, bear]
 
@@ -734,7 +860,7 @@ f_model1(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol) =>
 f_model3(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap) =>
     bull = false
     bear = false
-    if _or5Complete and not na(_or5H) and not na(_or5L)
+    if _or5Complete and not na(_or5H) and not na(_or5L) and _or5WidthOK
         if _edge and not pastCutoff and inNYSession
             volOk  = _rvol >= i_m3_volMult
             slDist = _ratr * i_atrMult
@@ -744,7 +870,7 @@ f_model3(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap) =>
                 slP     = entryP - slDist
                 tpP     = entryP + slDist * i_m3_rratio
                 f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
-                f_drawLabel("M3 5min", entryP, slP, tpP, true, 2.2)
+                f_drawLabel("M3 5min", entryP, slP, tpP, true, 2.2, f_modelScore(true,  _rc, _rvol, _rvwap, ref_rsi14))
                 f_registerTrade(3, entryP, slP, tpP, true)
             if _rc < _or5L and _rc1 >= _or5L and volOk and _rc < _rvwap and not _firedBear
                 bear   := true
@@ -752,7 +878,7 @@ f_model3(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap) =>
                 slP     = entryP + slDist
                 tpP     = entryP - slDist * i_m3_rratio
                 f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
-                f_drawLabel("M3 5min", entryP, slP, tpP, false, 2.2)
+                f_drawLabel("M3 5min", entryP, slP, tpP, false, 2.2, f_modelScore(false, _rc, _rvol, _rvwap, ref_rsi14))
                 f_registerTrade(3, entryP, slP, tpP, false)
     [bull, bear]
 
@@ -761,7 +887,7 @@ f_model3(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap) =>
 f_model4(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap, _rrsi) =>
     bull = false
     bear = false
-    if _or15Complete and not na(_or15H) and not na(_or15L)
+    if _or15Complete and not na(_or15H) and not na(_or15L) and _or15WidthOK
         if _edge and not pastCutoff and inNYSession
             volOk   = _rvol >= i_m4_volMult
             htfBull = htfClose > htfEma20 and htfEma20 > htfEma50
@@ -774,7 +900,7 @@ f_model4(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap, _rrsi) 
                     slP     = entryP - slDist
                     tpP     = entryP + slDist * i_m4_rratio
                     f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
-                    f_drawLabel("M4 15min", entryP, slP, tpP, true, 3.0)
+                    f_drawLabel("M4 15min", entryP, slP, tpP, true, 3.0, f_modelScore(true,  _rc, _rvol, _rvwap, _rrsi))
                     f_registerTrade(4, entryP, slP, tpP, true)
             if _rc < _or15L and _rc1 >= _or15L and not _firedBear
                 if volOk and _rc < _rvwap and _rrsi <= i_m4_rsiMax and _rrsi >= 30 and htfBear
@@ -783,7 +909,7 @@ f_model4(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap, _rrsi) 
                     slP     = entryP + slDist
                     tpP     = entryP - slDist * i_m4_rratio
                     f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
-                    f_drawLabel("M4 15min", entryP, slP, tpP, false, 3.0)
+                    f_drawLabel("M4 15min", entryP, slP, tpP, false, 3.0, f_modelScore(false, _rc, _rvol, _rvwap, _rrsi))
                     f_registerTrade(4, entryP, slP, tpP, false)
     [bull, bear]
 
@@ -792,25 +918,28 @@ f_model4(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap, _rrsi) 
 f_model7(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap) =>
     bull = false
     bear = false
-    if _or15Complete and not na(_or15H) and not na(_or15L)
+    if _or15Complete and not na(_or15H) and not na(_or15L) and _or15WidthOK
         if _edge and nyHour < i_m7_cutoffHour and inNYSession
             slDist = _ratr * i_atrMult
             volOk  = i_m7_volMult <= 0 or _rvol >= i_m7_volMult
+            orMid7  = (_or15H + _or15L) / 2
             if _rc > _or15H and _rc1 <= _or15H and not _firedBull and volOk and _rc > _rvwap
                 bull   := true
-                entryP  = _or15H
-                slP     = entryP - slDist
-                tpP     = entryP + slDist * i_m7_rratio
+                entryP  = _rc                      // confirmed close above OR high
+                slP     = orMid7 - slDist          // SL below OR mid + ATR buffer
+                riskD   = entryP - slP
+                tpP     = entryP + riskD * i_m7_rratio
                 f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
-                f_drawLabel("M7 Gold", entryP, slP, tpP, true, 2.2)
+                f_drawLabel("M7 Gold", entryP, slP, tpP, true, 2.2, f_modelScore(true,  _rc, _rvol, _rvwap, ref_rsi14))
                 f_registerTrade(7, entryP, slP, tpP, true)
             if _rc < _or15L and _rc1 >= _or15L and not _firedBear and volOk and _rc < _rvwap
                 bear   := true
-                entryP  = _or15L
-                slP     = entryP + slDist
-                tpP     = entryP - slDist * i_m7_rratio
+                entryP  = _rc                      // confirmed close below OR low
+                slP     = orMid7 + slDist          // SL above OR mid + ATR buffer
+                riskD   = slP - entryP
+                tpP     = entryP - riskD * i_m7_rratio
                 f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
-                f_drawLabel("M7 Gold", entryP, slP, tpP, false, 2.2)
+                f_drawLabel("M7 Gold", entryP, slP, tpP, false, 2.2, f_modelScore(false, _rc, _rvol, _rvwap, ref_rsi14))
                 f_registerTrade(7, entryP, slP, tpP, false)
     [bull, bear]
 
@@ -818,49 +947,49 @@ f_model7(_firedBull, _firedBear, _rc, _rc1, _ratr, _edge, _rvol, _rvwap) =>
 // SECTION 13 — RUN STATELESS MODELS (Multi-Model mode)
 // ============================================================
 
-if i_mode == "Multi-Model"
+if true
     if i_m1_on
         // M1 uses fast TF (default 1m) — best per CSV backtest
         [b, s] = f_model1(_m1FiredBull, _m1FiredBear, fast_close, fast_close1, fast_atr14, _fastEdge, fast_rvol)
-        sig_m1_bull := b
-        sig_m1_bear := s
-        if b
+        sig_m1_bull := b and _dxyBullGate
+        sig_m1_bear := s and _dxyBearGate
+        if b and _dxyBullGate
             _m1FiredBull    := true
             _agreeCountBull += 1
-        if s
+        if s and _dxyBearGate
             _m1FiredBear    := true
             _agreeCountBear += 1
     if i_m3_on
         // M3 uses primary TF (default 5m) — best per CSV backtest
         [b, s] = f_model3(_m3FiredBull, _m3FiredBear, ref_close, ref_close1, ref_atr14, _refEdge, ref_rvol, ref_vwap)
-        sig_m3_bull := b
-        sig_m3_bear := s
-        if b
+        sig_m3_bull := b and _dxyBullGate
+        sig_m3_bear := s and _dxyBearGate
+        if b and _dxyBullGate
             _m3FiredBull    := true
             _agreeCountBull += 1
-        if s
+        if s and _dxyBearGate
             _m3FiredBear    := true
             _agreeCountBear += 1
     if i_m4_on
         // M4 uses primary TF (default 5m)
         [b, s] = f_model4(_m4FiredBull, _m4FiredBear, ref_close, ref_close1, ref_atr14, _refEdge, ref_rvol, ref_vwap, ref_rsi14)
-        sig_m4_bull := b
-        sig_m4_bear := s
-        if b
+        sig_m4_bull := b and _dxyBullGate
+        sig_m4_bear := s and _dxyBearGate
+        if b and _dxyBullGate
             _m4FiredBull    := true
             _agreeCountBull += 1
-        if s
+        if s and _dxyBearGate
             _m4FiredBear    := true
             _agreeCountBear += 1
     if i_m7_on
         // M7 uses primary TF (default 5m)
         [b, s] = f_model7(_m7FiredBull, _m7FiredBear, ref_close, ref_close1, ref_atr14, _refEdge, ref_rvol, ref_vwap)
-        sig_m7_bull := b
-        sig_m7_bear := s
-        if b
+        sig_m7_bull := b and _dxyBullGate
+        sig_m7_bear := s and _dxyBearGate
+        if b and _dxyBullGate
             _m7FiredBull    := true
             _agreeCountBull += 1
-        if s
+        if s and _dxyBearGate
             _m7FiredBear    := true
             _agreeCountBear += 1
 
@@ -868,7 +997,7 @@ if i_mode == "Multi-Model"
 // SECTION 15 — MODEL 6: FVG ORB (INLINE — stateful)
 // ============================================================
 
-if i_m6_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and not na(_or15L)
+if i_m6_on and _or15Complete and not na(_or15H) and not na(_or15L) and _or15WidthOK
     if _refEdge and not pastCutoff and inNYSession and not _fvgTriggered
         orRange  = _or15H - _or15L
         minFvgSz = orRange * i_m6_fvgMinSize
@@ -879,13 +1008,13 @@ if i_m6_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and 
             fvgSz = _fvgTop - _fvgBot
             if fvgSz >= minFvgSz
                 // Price pulls back into FVG zone and closes back above it — bounce entry at close
-                if ref_low <= _fvgTop and ref_close > _fvgTop and ref_close > ref_vwap
+                if ref_low <= _fvgTop and ref_close > _fvgTop and ref_close > ref_vwap and _dxyBullGate
                     sig_m6_bull   := true
                     entryP         = ref_close          // actual fill price, not the stale FVG top
                     slP            = _fvgBot - slDist * 0.5
                     tpP            = entryP + (entryP - slP) * i_m6_rratio
                     f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
-                    f_drawLabel("M6 FVG", entryP, slP, tpP, true, 1.4)
+                    f_drawLabel("M6 FVG", entryP, slP, tpP, true, 1.4, f_modelScore(true,  ref_close, ref_rvol, ref_vwap, ref_rsi14))
                     f_registerTrade(6, entryP, slP, tpP, true)
                     _agreeCountBull += 1
                     if i_showBox
@@ -896,13 +1025,13 @@ if i_m6_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and 
         if _fvgBear and not na(_fvgTop) and not na(_fvgBot) and not _fvgTriggered and bar_index > _fvgFormedBar
             fvgSz = _fvgTop - _fvgBot
             if fvgSz >= minFvgSz
-                if ref_high >= _fvgBot and ref_close < _fvgBot and ref_close < ref_vwap
+                if ref_high >= _fvgBot and ref_close < _fvgBot and ref_close < ref_vwap and _dxyBearGate
                     sig_m6_bear   := true
                     entryP         = ref_close          // actual fill price, not the stale FVG bot
                     slP            = _fvgTop + slDist * 0.5
                     tpP            = entryP - (slP - entryP) * i_m6_rratio
                     f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
-                    f_drawLabel("M6 FVG", entryP, slP, tpP, false, 1.4)
+                    f_drawLabel("M6 FVG", entryP, slP, tpP, false, 1.4, f_modelScore(false, ref_close, ref_rvol, ref_vwap, ref_rsi14))
                     f_registerTrade(6, entryP, slP, tpP, false)
                     _agreeCountBear += 1
                     if i_showBox
@@ -914,7 +1043,7 @@ if i_m6_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and 
 // SECTION 17 — MODEL 9: Failed ORB Reversal (INLINE — stateful)
 // ============================================================
 
-if i_m9_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and not na(_or15L)
+if i_m9_on and _or15Complete and not na(_or15H) and not na(_or15L) and _or15WidthOK
     if _refEdge and inNYSession
         slDist = ref_atr14 * i_atrMult
 
@@ -940,16 +1069,16 @@ if i_m9_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and 
                 // Always reset state when threshold reached — prevents stuck state on subsequent bars
                 _m9BullBreak   := false
                 _m9InsideCount := 0
-                // Only fire if VWAP and RVOL conditions are met
-                if ref_close < ref_vwap and ref_rvol >= 1.2
+                // Fire on confirmed failure — DXY gate + once-per-day guard
+                if _dxyBearGate and not _m9FiredBear
                     sig_m9_bear    := true
+                    _m9FiredBear   := true
                     entryP          = ref_close
                     slP             = _or15H + slDist * 0.5
                     tpP             = entryP - (slP - entryP) * i_m9_rratio
                     f_drawSLTP(entryP, slP, tpP, i_colBear, i_colSL, i_colTP)
-                    f_drawLabel("M9 FailORB", entryP, slP, tpP, false, 4.6)
+                    f_drawLabel("M9 FailORB", entryP, slP, tpP, false, 4.6, f_modelScore(false, ref_close, ref_rvol, ref_vwap, ref_rsi14))
                     f_registerTrade(9, entryP, slP, tpP, false)
-                    _agreeCountBear += 1
 
         // Track bars returning inside OR after bear breakout
         if _m9BearBreak and not _m9BullBreak
@@ -959,18 +1088,19 @@ if i_m9_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and 
                 _m9InsideCount := 0
             // Enough bars back inside → bear failed → long at market (close)
             if _m9InsideCount >= i_m9_failBars and not pastCutoff
-                // Always reset state — prevents stuck state if VWAP/RVOL block the fire
+                // Always reset state — prevents stuck state on subsequent bars
                 _m9BearBreak   := false
                 _m9InsideCount := 0
-                if ref_close > ref_vwap and ref_rvol >= 1.2
+                // Fire on confirmed failure — DXY gate + once-per-day guard
+                if _dxyBullGate and not _m9FiredBull
                     sig_m9_bull    := true
+                    _m9FiredBull   := true
                     entryP          = ref_close
                     slP             = _or15L - slDist * 0.5
                     tpP             = entryP + (entryP - slP) * i_m9_rratio
                     f_drawSLTP(entryP, slP, tpP, i_colBull, i_colSL, i_colTP)
-                    f_drawLabel("M9 FailORB", entryP, slP, tpP, true, 4.6)
+                    f_drawLabel("M9 FailORB", entryP, slP, tpP, true, 4.6, f_modelScore(true,  ref_close, ref_rvol, ref_vwap, ref_rsi14))
                     f_registerTrade(9, entryP, slP, tpP, true)
-                    _agreeCountBull += 1
 
 // ============================================================
 // SECTION 17A-M10 — MODEL 10: BDM ORB (inline, global scope)
@@ -978,12 +1108,14 @@ if i_m9_on and i_mode == "Multi-Model" and _or15Complete and not na(_or15H) and 
 // OR Window: 9:30-9:45 EST (reuses _or15H/_or15L from M4/M7)
 // ============================================================
 
-if i_m10_on and i_mode == "Multi-Model" and _or15Complete
+if i_m10_on and _or15Complete and _or15WidthOK
     // ── PHASE 1: 5-min breakout confirmation ───────────────────
     // Gate: _refEdge ensures we only fire on a new 5-min bar close
     if _refEdge and not pastCutoff
-        // Bull: 5-min close crosses above OR high
+        _bdmVolOk = i_m7_volMult <= 0 or ref_rvol >= i_m7_volMult   // reuse M7 vol threshold (shared param)
+        // Bull: 5-min close crosses above OR high — require VWAP + volume
         if ref_close > _or15H and ref_close1 <= _or15H and not _bdmFiredBull and not _bdmBullBreak
+             and _bdmVolOk and ref_close > ref_vwap
             _bdmBullBreak      := true
             _bdmBullBreakLevel := _or15H
             _bdmBullWaitBars   := 0
@@ -994,8 +1126,9 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
                      color=color.new(i_colORLine, 50), style=line.style_dashed, width=1)
                 array.push(_lines, _bdmBullRetestLine)
 
-        // Bear: 5-min close crosses below OR low
+        // Bear: 5-min close crosses below OR low — require VWAP + volume
         if ref_close < _or15L and ref_close1 >= _or15L and not _bdmFiredBear and not _bdmBearBreak
+             and _bdmVolOk and ref_close < ref_vwap
             _bdmBearBreak      := true
             _bdmBearBreakLevel := _or15L
             _bdmBearWaitBars   := 0
@@ -1040,7 +1173,7 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
 
             // Phase 3: bounce entry (1-min close back above OR high after retest)
             else
-                if fast_close > _bdmBullBreakLevel and not pastCutoff
+                if fast_close > _bdmBullBreakLevel and not pastCutoff and _dxyBullGate
                     entryP10 = fast_close
                     slP10    = _bdmBullBreakLevel - ref_atr14 * i_bdm_slMult
                     tpP10    = entryP10 + (entryP10 - slP10) * i_bdm_rratio
@@ -1049,7 +1182,7 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
                     f_registerTrade(11, entryP10, slP10, tpP10, true)
                     _agreeCountBull += 1
                     f_drawSLTP(entryP10, slP10, tpP10, i_colBull, i_colSL, i_colTP)
-                    f_drawLabel("M10 BDM ▲", entryP10, slP10, tpP10, true, 4.6)
+                    f_drawLabel("M10 BDM ▲", entryP10, slP10, tpP10, true, 4.6, f_modelScore(true,  fast_close, fast_rvol, fast_vwap, ref_rsi14))
                     line.delete(_bdmBullRetestLine)
                     _bdmBullRetestLine := na
                     _bdmBullBreak      := false
@@ -1088,7 +1221,7 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
 
             // Phase 3: bounce entry
             else
-                if fast_close < _bdmBearBreakLevel and not pastCutoff
+                if fast_close < _bdmBearBreakLevel and not pastCutoff and _dxyBearGate
                     entryP10b = fast_close
                     slP10b    = _bdmBearBreakLevel + ref_atr14 * i_bdm_slMult
                     tpP10b    = entryP10b - (slP10b - entryP10b) * i_bdm_rratio   // slP10b > entryP10b for shorts, so this yields a price below entry
@@ -1097,7 +1230,7 @@ if i_m10_on and i_mode == "Multi-Model" and _or15Complete
                     f_registerTrade(11, entryP10b, slP10b, tpP10b, false)
                     _agreeCountBear += 1
                     f_drawSLTP(entryP10b, slP10b, tpP10b, i_colBear, i_colSL, i_colTP)
-                    f_drawLabel("M10 BDM ▼", entryP10b, slP10b, tpP10b, false, 4.6)
+                    f_drawLabel("M10 BDM ▼", entryP10b, slP10b, tpP10b, false, 4.6, f_modelScore(false, fast_close, fast_rvol, fast_vwap, ref_rsi14))
                     line.delete(_bdmBearRetestLine)
                     _bdmBearRetestLine := na
                     _bdmBearBreak      := false
@@ -1169,16 +1302,42 @@ if trSz > 0
                 _mI = array.get(_trModel, _ti) - 1
                 if _outcome == 1
                     array.set(_mWins,   _mI, array.get(_mWins,   _mI) + 1)
+                    _cs = array.get(_mStreak, _mI)
+                    array.set(_mStreak, _mI, _cs > 0 ? _cs + 1 : 1)
                 else
                     array.set(_mLosses, _mI, array.get(_mLosses, _mI) + 1)
+                    _cs = array.get(_mStreak, _mI)
+                    array.set(_mStreak, _mI, _cs < 0 ? _cs - 1 : -1)
+                _bTP = array.get(_trBoxTP, _ti)
+                _bSL = array.get(_trBoxSL, _ti)
+                if not na(_bTP)
+                    box.set_right(_bTP, bar_index)
+                if not na(_bSL)
+                    box.set_right(_bSL, bar_index)
             else if _tpHit
                 array.set(_trStatus, _ti, 1)
                 _mI = array.get(_trModel, _ti) - 1
                 array.set(_mWins, _mI, array.get(_mWins, _mI) + 1)
+                _cs = array.get(_mStreak, _mI)
+                array.set(_mStreak, _mI, _cs > 0 ? _cs + 1 : 1)
+                _bTP = array.get(_trBoxTP, _ti)
+                _bSL = array.get(_trBoxSL, _ti)
+                if not na(_bTP)
+                    box.set_right(_bTP, bar_index)
+                if not na(_bSL)
+                    box.set_right(_bSL, bar_index)
             else if _slHit
                 array.set(_trStatus, _ti, -1)
                 _mI = array.get(_trModel, _ti) - 1
                 array.set(_mLosses, _mI, array.get(_mLosses, _mI) + 1)
+                _cs = array.get(_mStreak, _mI)
+                array.set(_mStreak, _mI, _cs < 0 ? _cs - 1 : -1)
+                _bTP = array.get(_trBoxTP, _ti)
+                _bSL = array.get(_trBoxSL, _ti)
+                if not na(_bTP)
+                    box.set_right(_bTP, bar_index)
+                if not na(_bSL)
+                    box.set_right(_bSL, bar_index)
 
 // Trim old trades when array exceeds i_maxTrades
 while array.size(_trEntry) > i_maxTrades
@@ -1190,6 +1349,8 @@ while array.size(_trEntry) > i_maxTrades
     array.shift(_trStatus)
     array.shift(_trBar)
     array.shift(_trDay)
+    array.shift(_trBoxTP)
+    array.shift(_trBoxSL)
 
 // ============================================================
 // SECTION 17C — DAY BIAS CALCULATION
@@ -1277,9 +1438,25 @@ f_scoreOrderFlow(isBull, _rh, _rl, _rc, _bullBar, _bearBar) =>
         else
             _bearBar ? (ratio >= 0.6 ? 100.0 : ratio >= 0.4 ? 70.0 : 40.0) : 0.0
 
+// ── DXY Inverse Correlation Score ────────────────────────────
+// Bull Gold → DXY should be bearish; Bear Gold → DXY should be bullish.
+// Returns 0.0 when disabled or na (neutral, no penalty).
+f_scoreDXY(isBull, _dClose, _dEma20, _dEma50) =>
+    if not _dxyActive
+        0.0
+    else if na(_dClose) or na(_dEma20) or na(_dEma50)
+        0.0
+    else if isBull
+        (_dClose < _dEma20 and _dEma20 < _dEma50) ? 100.0 :
+         _dClose < _dEma20                          ?  60.0 : 20.0
+    else
+        (_dClose > _dEma20 and _dEma20 > _dEma50) ? 100.0 :
+         _dClose > _dEma20                          ?  60.0 : 20.0
+
 // _rc/_rc1/_ratr/_rvol/_rvwap/_rh/_rl/_bullBar/_bearBar: TF data to use for scoring
-f_confidence(isBull, _rc, _ratr, _rvol, _rvwap, _rh, _rl, _bullBar, _bearBar) =>
-    totalW = i_wVol + i_wHTF + i_wDay + i_wNR + i_wATR + i_wClose + i_wVWAP + i_wFlow
+f_confidence(isBull, _rc, _ratr, _rvol, _rvwap, _rh, _rl, _bullBar, _bearBar, _dClose, _dEma20, _dEma50) =>
+    _dxyW  = _dxyActive ? i_wDXY : 0
+    totalW = i_wVol + i_wHTF + i_wDay + i_wNR + i_wATR + i_wClose + i_wVWAP + i_wFlow + _dxyW
     if totalW == 0
         0.0
     else
@@ -1290,20 +1467,31 @@ f_confidence(isBull, _rc, _ratr, _rvol, _rvwap, _rh, _rl, _bullBar, _bearBar) =>
                f_scoreATR()                                     * i_wATR  +
                f_scoreCloseQuality(isBull, _rc, _ratr)          * i_wClose +
                f_scoreVWAP(isBull, _rc, _rvwap)                 * i_wVWAP +
-               f_scoreOrderFlow(isBull, _rh, _rl, _rc, _bullBar, _bearBar) * i_wFlow
+               f_scoreOrderFlow(isBull, _rh, _rl, _rc, _bullBar, _bearBar) * i_wFlow +
+               f_scoreDXY(isBull, _dClose, _dEma20, _dEma50)   * _dxyW
         wSum / totalW
 
 f_grade(score) =>
     score >= 80 ? "A" : score >= 60 ? "B" : score >= 40 ? "C" : "F"
 
+// Formats raw pip value → "+123.4p" / "-45.0p" for display
+f_formatPips(pips) =>
+    rounded = math.round(pips * 10) / 10.0
+    (rounded >= 0 ? "+" : "") + str.tostring(rounded, "#.#") + "p"
+
 // ── Combined Mode Signal (INLINE) ─────────────────────────────
 // Uses fast TF (default 1m) for signal trigger and scoring — best per CSV (50–90% WR)
-if i_mode == "Combined" and _or15Complete and not na(_or15H) and not na(_or15L)
+if i_comb_on and _or15Complete and not na(_or15H) and not na(_or15L) and _or15WidthOK
     if _fastEdge and not pastCutoff and inNYSession
+        // DXY hard gate (inverse: DXY bear confirms Gold bull, DXY bull confirms Gold bear)
+        _dxyBullish = (not _dxyActive or not i_dxy_hard_gate) ? true :
+             (na(dxy_close) or na(dxy_ema20)) ? true : dxy_close < dxy_ema20
+        _dxyBearish = (not _dxyActive or not i_dxy_hard_gate) ? true :
+             (na(dxy_close) or na(dxy_ema20)) ? true : dxy_close > dxy_ema20
         slDist = fast_atr14 * i_atrMult
 
-        if fast_close > _or15H and fast_close1 <= _or15H and not _combLongFired
-            score = f_confidence(true, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar)
+        if fast_close > _or15H and fast_close1 <= _or15H and not _combLongFired and _dxyBullish
+            score = f_confidence(true, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar, dxy_close, dxy_ema20, dxy_ema50)
             if score >= float(i_minScore)
                 sig_comb_bull   := true
                 _combLongFired  := true
@@ -1326,8 +1514,8 @@ if i_mode == "Combined" and _or15Complete and not na(_or15H) and not na(_or15L)
                          textcolor = color.white,
                          size      = size.normal))
 
-        if fast_close < _or15L and fast_close1 >= _or15L and not _combShortFired
-            score = f_confidence(false, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar)
+        if fast_close < _or15L and fast_close1 >= _or15L and not _combShortFired and _dxyBearish
+            score = f_confidence(false, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar, dxy_close, dxy_ema20, dxy_ema50)
             if score >= float(i_minScore)
                 sig_comb_bear   := true
                 _combShortFired := true
@@ -1359,7 +1547,29 @@ _biasArrow  = _dayBias == "BULLISH" ? " ▲" : _dayBias == "BEARISH" ? " ▼" : 
 _biasHTFStr = htfClose > htfEma20 and htfEma20 > htfEma50 ? "Bull" : htfClose < htfEma20 and htfEma20 < htfEma50 ? "Bear" : "Neutral"
 _biasVWAPStr = not na(ref_vwap) ? (ref_close > ref_vwap ? "Above" : "Below") : "NA"
 _biasScoreStr = str.tostring(math.round(math.abs(_biasScore))) + "%"
-_biasLabelTxt = "DAY BIAS: " + _dayBias + _biasArrow + "\nScore: " + _biasScoreStr + "\nHTF: " + _biasHTFStr + "  VWAP: " + _biasVWAPStr
+// DXY label line with actionable recommendation
+// Recommendation logic: DXY + Day Bias must AGREE for a clear trade call
+_dxyIsBear  = _dxyActive and not na(dxy_close) and not na(dxy_ema20) and dxy_close < dxy_ema20
+_dxyIsBull  = _dxyActive and not na(dxy_close) and not na(dxy_ema20) and dxy_close > dxy_ema20
+_dxyRec     = not _dxyActive or (na(dxy_close) or na(dxy_ema20))        ? "" :
+     _dxyIsBear and _dayBias == "BULLISH"                               ? " → GO LONG" :
+     _dxyIsBull and _dayBias == "BEARISH"                               ? " → GO SHORT" :
+     _dayBias == "NEUTRAL"                                               ? " → WAIT" :
+                                                                           " → AVOID"
+_dxyLabelLine = not _dxyActive                                          ? "" :
+     na(dxy_close) or na(dxy_ema20)                                     ? "\nDXY: N/A" :
+     dxy_close < dxy_ema20 and dxy_ema20 < dxy_ema50                   ? "\nDXY: ▼▼ Bear (Gold+)" + _dxyRec :
+     dxy_close < dxy_ema20                                               ? "\nDXY: ▼ Soft Bear (Gold+)" + _dxyRec :
+     dxy_close > dxy_ema20 and dxy_ema20 > dxy_ema50                   ? "\nDXY: ▲▲ Bull (Gold-)" + _dxyRec :
+     dxy_close > dxy_ema20                                               ? "\nDXY: ▲ Soft Bull (Gold-)" + _dxyRec : ""
+_newsActive    = i_news_on and _isGoldChart
+_cpiDirStr     = _lastCpiMoM > 0 ? "▲ HOT → Gold-"    : _lastCpiMoM < 0 ? "▼ COOL → Gold+" : "—"
+_nfpDirStr     = _lastNfpMoM > 0 ? "▲ STRONG → Gold-" : _lastNfpMoM < 0 ? "▼ WEAK → Gold+" : "—"
+_cpiLabelLine  = not _newsActive or na(econ_cpi) ? "" :
+     "\n" + (_cpiToday ? "! " : "") + "CPI " + str.tostring(econ_cpi, "#.##") + " " + _cpiDirStr
+_nfpLabelLine  = not _newsActive or na(econ_nfp) ? "" :
+     "\n" + (_nfpToday ? "! " : "") + "NFP " + str.tostring(math.round(econ_nfp / 1000)) + "K " + _nfpDirStr
+_biasLabelTxt = "DAY BIAS: " + _dayBias + _biasArrow + "\nScore: " + _biasScoreStr + "\nHTF: " + _biasHTFStr + "  VWAP: " + _biasVWAPStr + _dxyLabelLine + _cpiLabelLine + _nfpLabelLine
 _biasLabelClr = _dayBias == "BULLISH" ? color.new(#00E676, 15) : _dayBias == "BEARISH" ? color.new(#FF1744, 15) : color.new(#607D8B, 15)
 _biasLabelY   = ref_close + ref_atr14 * 2.0
 
@@ -1379,64 +1589,7 @@ else
 // Gives user time to place limit orders at OR H/L in advance
 // ============================================================
 
-if i_mode == "Combined" and _or15Complete and not na(_or15H) and not na(_or15L) and not pastCutoff and inNYSession
-    _pendSlDist = fast_atr14 * i_atrMult
-
-    // ── Pending Long (at OR High) ──────────────────────────────
-    if not _combLongFired
-        _pEntryL = _or15H
-        _pSlL    = _pEntryL - _pendSlDist
-        _pTpL    = _pEntryL + _pendSlDist * 2.0
-        _pScoreL = f_confidence(true, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar)
-        _pGradeL = f_grade(_pScoreL)
-        _pArmL   = _pScoreL >= float(i_minScore)
-        _pTxtL   = "⏳ LIMIT LONG  @" + str.tostring(_pEntryL, format.mintick) +
-                   "\nSL: "  + str.tostring(_pSlL, format.mintick) +
-                   "\nTP: "  + str.tostring(_pTpL, format.mintick) +
-                   "\nScore: " + str.tostring(math.round(_pScoreL)) + "% [" + _pGradeL + "]" +
-                   (_pArmL ? "  ✓ ARMED" : "  ✗ BELOW MIN")
-        _pClrL   = _pArmL ? color.new(#00E676, 15) : color.new(#607D8B, 40)
-        if na(_combPendLong)
-            _combPendLong := label.new(bar_index, _or15H + _pendSlDist * 0.4, _pTxtL,
-                 color=_pClrL, style=label.style_label_down,
-                 textcolor=color.white, size=size.small)
-        else
-            label.set_x(_combPendLong, bar_index)
-            label.set_y(_combPendLong, _or15H + _pendSlDist * 0.4)
-            label.set_text(_combPendLong, _pTxtL)
-            label.set_color(_combPendLong, _pClrL)
-    else
-        if not na(_combPendLong)
-            label.delete(_combPendLong)
-            _combPendLong := na
-
-    // ── Pending Short (at OR Low) ──────────────────────────────
-    if not _combShortFired
-        _pEntryS = _or15L
-        _pSlS    = _pEntryS + _pendSlDist
-        _pTpS    = _pEntryS - _pendSlDist * 2.0
-        _pScoreS = f_confidence(false, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar)
-        _pGradeS = f_grade(_pScoreS)
-        _pArmS   = _pScoreS >= float(i_minScore)
-        _pTxtS   = "⏳ LIMIT SHORT  @" + str.tostring(_pEntryS, format.mintick) +
-                   "\nSL: "  + str.tostring(_pSlS, format.mintick) +
-                   "\nTP: "  + str.tostring(_pTpS, format.mintick) +
-                   "\nScore: " + str.tostring(math.round(_pScoreS)) + "% [" + _pGradeS + "]" +
-                   (_pArmS ? "  ✓ ARMED" : "  ✗ BELOW MIN")
-        _pClrS   = _pArmS ? color.new(#FF1744, 15) : color.new(#607D8B, 40)
-        if na(_combPendShort)
-            _combPendShort := label.new(bar_index, _or15L - _pendSlDist * 0.4, _pTxtS,
-                 color=_pClrS, style=label.style_label_up,
-                 textcolor=color.white, size=size.small)
-        else
-            label.set_x(_combPendShort, bar_index)
-            label.set_y(_combPendShort, _or15L - _pendSlDist * 0.4)
-            label.set_text(_combPendShort, _pTxtS)
-            label.set_color(_combPendShort, _pClrS)
-    else
-        if not na(_combPendShort)
-            label.delete(_combPendShort)
-            _combPendShort := na
+// Combined pending limit-order labels removed
 
 // ============================================================
 // SECTION 19 — DASHBOARD TABLES
@@ -1448,12 +1601,16 @@ f_tablePos(p) =>
      p == "Bottom Right"? position.bottom_right :
                           position.bottom_left
 
-C_HEAD    = color.new(#1565C0, 0)
-C_NONE    = color.new(#1A1D26, 0)
+C_HEAD     = color.new(#1565C0, 0)
+C_NONE     = color.new(#1A1D26, 0)
 C_BULL_DIM = color.new(#00E676, 50)
 C_BEAR_DIM = color.new(#FF1744, 50)
-C_TXT     = color.white
-C_TXT_DIM = color.new(color.white, 40)
+C_TXT      = i_colTxtMain
+C_TXT_DIM  = i_colTxtDim
+
+// Text size helpers — used for every table.cell() call
+_dashSz = i_dashTextSize == "Normal" ? size.normal : i_dashTextSize == "Small" ? size.small : size.tiny
+_headSz = i_dashTextSize == "Normal" ? size.large  : i_dashTextSize == "Small" ? size.normal : size.small
 
 // ── Win-rate helper: reads per-model counters (unaffected by array trim or other models) ─
 f_winRate(modelIdx) =>
@@ -1463,7 +1620,7 @@ f_winRate(modelIdx) =>
     [w, l, w + l]
 
 // ── Multi-Model Dashboard ─────────────────────────────────────
-if i_showDashboard and i_mode == "Multi-Model"
+if i_showDashboard
     if na(_dashTable)
         _dashTable := table.new(f_tablePos(i_dashPos), 10, 10,
              bgcolor       = color.new(#1A1D26, 10),
@@ -1473,16 +1630,16 @@ if i_showDashboard and i_mode == "Multi-Model"
              frame_width   = 1)
 
     // Header row
-    table.cell(_dashTable, 0, 0, "MODEL",   text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_dashTable, 1, 0, "SIGNAL",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_dashTable, 2, 0, "DIR",     text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_dashTable, 3, 0, "ENTRY",   text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_dashTable, 4, 0, "SL",      text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_dashTable, 5, 0, "TP",      text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_dashTable, 6, 0, "WIN%",    text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_dashTable, 7, 0, "OR HIGH", text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_dashTable, 8, 0, "OR LOW",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_dashTable, 9, 0, "SCORE",   text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_dashTable, 0, 0, "MODEL",   text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_dashTable, 1, 0, "SIGNAL",  text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_dashTable, 2, 0, "DIR",     text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_dashTable, 3, 0, "ENTRY",   text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_dashTable, 4, 0, "SL",      text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_dashTable, 5, 0, "TP",      text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_dashTable, 6, 0, "WIN%",    text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_dashTable, 7, 0, "OR HIGH", text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_dashTable, 8, 0, "OR LOW",  text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_dashTable, 9, 0, "SCORE",   text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
 
     // Data rows — read from persistent _dashSignal and _lastEntry/SL/TP arrays
     orHStr = na(_or15H) ? "-" : str.tostring(_or15H, format.mintick)
@@ -1520,24 +1677,24 @@ if i_showDashboard and i_mode == "Multi-Model"
         tpStr   = na(lTP)    ? "-" : str.tostring(lTP,    format.mintick)
         [mW, mL, mT] = f_winRate(array.get(mIdxs, i))
         wrStr   = mT >= 1 ? str.tostring(math.round(float(mW) / float(mT) * 100)) + "%" : "-"
-        wrClr   = mT < 1 ? C_TXT_DIM : float(mW) / float(mT) >= 0.6 ? color.new(#00E676,0) :
-                   float(mW) / float(mT) >= 0.5 ? color.new(#FF9800,0) : color.new(#FF1744,0)
+        wrClr   = mT < 1 ? C_TXT_DIM : float(mW) / float(mT) >= 0.6 ? i_colWinHigh :
+                   float(mW) / float(mT) >= 0.5 ? i_colWinMid : i_colWinLow
         row     = i + 1
-        table.cell(_dashTable, 0, row, array.get(mNames,i),  text_color=C_TXT,    bgcolor=rowBG, text_size=size.tiny)
-        table.cell(_dashTable, 1, row, sigStr,                text_color=sigClr,   bgcolor=rowBG, text_size=size.tiny)
-        table.cell(_dashTable, 2, row, dirStr,                text_color=sigClr,   bgcolor=rowBG, text_size=size.tiny)
-        table.cell(_dashTable, 3, row, entStr,                text_color=sigClr,   bgcolor=rowBG, text_size=size.tiny)
-        table.cell(_dashTable, 4, row, slStr,                 text_color=color.new(#FF5252,0), bgcolor=rowBG, text_size=size.tiny)
-        table.cell(_dashTable, 5, row, tpStr,                 text_color=color.new(#69F0AE,0), bgcolor=rowBG, text_size=size.tiny)
-        table.cell(_dashTable, 6, row, wrStr,                 text_color=wrClr,    bgcolor=rowBG, text_size=size.tiny)
-        table.cell(_dashTable, 7, row, orHStr,                text_color=C_TXT_DIM,bgcolor=rowBG, text_size=size.tiny)
-        table.cell(_dashTable, 8, row, orLStr,                text_color=C_TXT_DIM,bgcolor=rowBG, text_size=size.tiny)
+        table.cell(_dashTable, 0, row, array.get(mNames,i),  text_color=C_TXT,    bgcolor=rowBG, text_size=_dashSz)
+        table.cell(_dashTable, 1, row, sigStr,                text_color=sigClr,   bgcolor=rowBG, text_size=_dashSz)
+        table.cell(_dashTable, 2, row, dirStr,                text_color=sigClr,   bgcolor=rowBG, text_size=_dashSz)
+        table.cell(_dashTable, 3, row, entStr,                text_color=sigClr,   bgcolor=rowBG, text_size=_dashSz)
+        table.cell(_dashTable, 4, row, slStr,                 text_color=i_colSL, bgcolor=rowBG, text_size=_dashSz)
+        table.cell(_dashTable, 5, row, tpStr,                 text_color=i_colTP, bgcolor=rowBG, text_size=_dashSz)
+        table.cell(_dashTable, 6, row, wrStr,                 text_color=wrClr,    bgcolor=rowBG, text_size=_dashSz)
+        table.cell(_dashTable, 7, row, orHStr,                text_color=C_TXT_DIM,bgcolor=rowBG, text_size=_dashSz)
+        table.cell(_dashTable, 8, row, orLStr,                text_color=C_TXT_DIM,bgcolor=rowBG, text_size=_dashSz)
         scoreVal = array.get(_lastScore, _arrIdx)
-        scoreClr = scoreVal >= 70 ? color.new(#00E676,0) :
-                   scoreVal >= 50 ? color.new(#FF9800,0) :
-                   scoreVal >  0  ? color.new(#FF5252,0) : C_TXT_DIM
+        scoreClr = scoreVal >= 70 ? i_colWinHigh :
+                   scoreVal >= 50 ? i_colWinMid :
+                   scoreVal >  0  ? i_colWinLow : C_TXT_DIM
         scoreStr = scoreVal > 0 ? str.tostring(scoreVal) : "-"
-        table.cell(_dashTable, 9, row, scoreStr, text_color=scoreClr, bgcolor=rowBG, text_size=size.tiny)
+        table.cell(_dashTable, 9, row, scoreStr, text_color=scoreClr, bgcolor=rowBG, text_size=_dashSz)
         // Store for BEST badge deferred render
         array.set(_rowName,   i, array.get(mNames, i))
         array.set(_rowSig,    i, sigStr)
@@ -1567,20 +1724,20 @@ if i_showDashboard and i_mode == "Multi-Model"
         _bWrClr  = array.get(_rowWrClr,  _bestRow2)
         _bScoreVal = array.get(_lastScore, array.get(mIdxs, _bestRow2) - 1)
         _bScoreStr = _bScoreVal > 0 ? str.tostring(_bScoreVal) : "-"
-        _bScoreClr = _bScoreVal >= 70 ? color.new(#00E676,0) : _bScoreVal >= 50 ? color.new(#FF9800,0) : color.new(#FF5252,0)
-        table.cell(_dashTable, 0, _br, array.get(_rowName, _bestRow2) + " ◀", text_color=GOLD_TXT, bgcolor=GOLD_BG, text_size=size.tiny)
-        table.cell(_dashTable, 1, _br, array.get(_rowSig,  _bestRow2),         text_color=_bSigClr,  bgcolor=GOLD_BG, text_size=size.tiny)
-        table.cell(_dashTable, 2, _br, array.get(_rowDir,  _bestRow2),         text_color=_bSigClr,  bgcolor=GOLD_BG, text_size=size.tiny)
-        table.cell(_dashTable, 3, _br, array.get(_rowEnt,  _bestRow2),         text_color=_bSigClr,  bgcolor=GOLD_BG, text_size=size.tiny)
-        table.cell(_dashTable, 4, _br, array.get(_rowSl,   _bestRow2),         text_color=color.new(#FF5252,0), bgcolor=GOLD_BG, text_size=size.tiny)
-        table.cell(_dashTable, 5, _br, array.get(_rowTp,   _bestRow2),         text_color=color.new(#69F0AE,0), bgcolor=GOLD_BG, text_size=size.tiny)
-        table.cell(_dashTable, 6, _br, array.get(_rowWr,   _bestRow2),         text_color=_bWrClr,   bgcolor=GOLD_BG, text_size=size.tiny)
-        table.cell(_dashTable, 7, _br, orHStr,                                  text_color=C_TXT_DIM,  bgcolor=GOLD_BG, text_size=size.tiny)
-        table.cell(_dashTable, 8, _br, orLStr,                                  text_color=C_TXT_DIM,  bgcolor=GOLD_BG, text_size=size.tiny)
-        table.cell(_dashTable, 9, _br, _bScoreStr,                              text_color=_bScoreClr, bgcolor=GOLD_BG, text_size=size.tiny)
+        _bScoreClr = _bScoreVal >= 70 ? i_colWinHigh : _bScoreVal >= 50 ? i_colWinMid : i_colWinLow
+        table.cell(_dashTable, 0, _br, array.get(_rowName, _bestRow2) + " ◀", text_color=GOLD_TXT, bgcolor=GOLD_BG, text_size=_dashSz)
+        table.cell(_dashTable, 1, _br, array.get(_rowSig,  _bestRow2),         text_color=_bSigClr,  bgcolor=GOLD_BG, text_size=_dashSz)
+        table.cell(_dashTable, 2, _br, array.get(_rowDir,  _bestRow2),         text_color=_bSigClr,  bgcolor=GOLD_BG, text_size=_dashSz)
+        table.cell(_dashTable, 3, _br, array.get(_rowEnt,  _bestRow2),         text_color=_bSigClr,  bgcolor=GOLD_BG, text_size=_dashSz)
+        table.cell(_dashTable, 4, _br, array.get(_rowSl,   _bestRow2),         text_color=i_colSL, bgcolor=GOLD_BG, text_size=_dashSz)
+        table.cell(_dashTable, 5, _br, array.get(_rowTp,   _bestRow2),         text_color=i_colTP, bgcolor=GOLD_BG, text_size=_dashSz)
+        table.cell(_dashTable, 6, _br, array.get(_rowWr,   _bestRow2),         text_color=_bWrClr,   bgcolor=GOLD_BG, text_size=_dashSz)
+        table.cell(_dashTable, 7, _br, orHStr,                                  text_color=C_TXT_DIM,  bgcolor=GOLD_BG, text_size=_dashSz)
+        table.cell(_dashTable, 8, _br, orLStr,                                  text_color=C_TXT_DIM,  bgcolor=GOLD_BG, text_size=_dashSz)
+        table.cell(_dashTable, 9, _br, _bScoreStr,                              text_color=_bScoreClr, bgcolor=GOLD_BG, text_size=_dashSz)
 
-// ── Combined Mode Checklist ───────────────────────────────────
-if i_showDashboard and i_mode == "Combined"
+// ── Combined Mode Checklist — disabled (Combined now runs inside Multi-Model) ──
+if false and i_showDashboard and i_comb_on
     if na(_checkTable)
         _checkTable := table.new(f_tablePos(i_dashPos), 4, 11,
              bgcolor       = color.new(#1A1D26, 10),
@@ -1590,10 +1747,10 @@ if i_showDashboard and i_mode == "Combined"
              frame_width   = 1)
 
     // Header
-    table.cell(_checkTable, 0, 0, "FACTOR",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_checkTable, 1, 0, "SCORE",   text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_checkTable, 2, 0, "WEIGHT",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_checkTable, 3, 0, "STATUS",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_checkTable, 0, 0, "FACTOR",  text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_checkTable, 1, 0, "SCORE",   text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_checkTable, 2, 0, "WEIGHT",  text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_checkTable, 3, 0, "STATUS",  text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
 
     // Direction for scoring context
     isBullCtx = _confBull
@@ -1617,40 +1774,49 @@ if i_showDashboard and i_mode == "Combined"
         fn     = array.get(fNames,   i)
         stStr  = sc >= 70 ? "✓ PASS" : sc >= 40 ? "~ PART" : "✗ FAIL"
         stClr  = sc >= 70 ? color.new(#00E676,0) : sc >= 40 ? color.new(#FF9800,0) : color.new(#FF1744,0)
-        table.cell(_checkTable, 0, i+1, fn,                            text_color=C_TXT,    bgcolor=C_NONE, text_size=size.tiny)
-        table.cell(_checkTable, 1, i+1, str.tostring(math.round(sc)),  text_color=C_TXT,    bgcolor=C_NONE, text_size=size.tiny)
-        table.cell(_checkTable, 2, i+1, str.tostring(wt) + "%",        text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-        table.cell(_checkTable, 3, i+1, stStr,                         text_color=stClr,    bgcolor=C_NONE, text_size=size.tiny)
+        table.cell(_checkTable, 0, i+1, fn,                            text_color=C_TXT,    bgcolor=C_NONE, text_size=_dashSz)
+        table.cell(_checkTable, 1, i+1, str.tostring(math.round(sc)),  text_color=C_TXT,    bgcolor=C_NONE, text_size=_dashSz)
+        table.cell(_checkTable, 2, i+1, str.tostring(wt) + "%",        text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=_dashSz)
+        table.cell(_checkTable, 3, i+1, stStr,                         text_color=stClr,    bgcolor=C_NONE, text_size=_dashSz)
 
     // Summary row
-    totalSc  = f_confidence(isBullCtx, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar)
+    totalSc  = f_confidence(isBullCtx, fast_close, fast_atr14, fast_rvol, fast_vwap, fast_high, fast_low, fast_bullBar, fast_bearBar, dxy_close, dxy_ema20, dxy_ema50)
     gradeStr = f_grade(totalSc)
     gradeClr = totalSc >= 80 ? color.new(#00E676,0) : totalSc >= 60 ? color.new(#FF9800,0) : color.new(#FF1744,0)
     armedStr = totalSc >= float(i_minScore) ? "ARMED" : "BELOW MIN"
-    table.cell(_checkTable, 0, 9, "TOTAL SCORE",                          text_color=C_TXT,   bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_checkTable, 1, 9, str.tostring(math.round(totalSc)) + "%",text_color=gradeClr,bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_checkTable, 2, 9, "Grade: " + gradeStr,                   text_color=gradeClr,bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_checkTable, 3, 9, armedStr,                               text_color=gradeClr,bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_checkTable, 0, 9, "TOTAL SCORE",                          text_color=C_TXT,   bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_checkTable, 1, 9, str.tostring(math.round(totalSc)) + "%",text_color=gradeClr,bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_checkTable, 2, 9, "Grade: " + gradeStr,                   text_color=gradeClr,bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_checkTable, 3, 9, armedStr,                               text_color=gradeClr,bgcolor=C_HEAD, text_size=_headSz)
 
 // ── RVOL display row (row 8) ─────────────────────────────────
-if i_showDashboard and i_mode == "Multi-Model" and not na(_dashTable)
+if i_showDashboard and not na(_dashTable)
     rvolStr = str.tostring(math.round(ref_rvol * 100) / 100.0)
     rvolClr = ref_rvol >= 2.0 ? color.new(#FF6F00,0) : ref_rvol >= 1.5 ? color.new(#FF9800,0) : C_TXT_DIM
-    table.cell(_dashTable, 0, 8, "RVOL: " + rvolStr, text_color=rvolClr,   bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 0, 8, "RVOL: " + rvolStr, text_color=rvolClr,   bgcolor=C_NONE, text_size=_dashSz)
     table.cell(_dashTable, 1, 8, "ATR: "  + str.tostring(math.round(ref_atr14 * 100) / 100.0),
-         text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+         text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=_dashSz)
     table.cell(_dashTable, 2, 8, "VWAP: " + str.tostring(ref_vwap, format.mintick),
-         text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+         text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=_dashSz)
     table.cell(_dashTable, 3, 8, isNR7 ? "NR7" : isNR4 ? "NR4" : "-",
-         text_color=isNR7 or isNR4 ? color.new(#FF9800,0) : C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+         text_color=isNR7 or isNR4 ? color.new(#FF9800,0) : C_TXT_DIM, bgcolor=C_NONE, text_size=_dashSz)
     _bullAgStr = _agreeCountBull > 0 ? str.tostring(_agreeCountBull) + " BULL ↑" : "-"
     _bearAgStr = _agreeCountBear > 0 ? str.tostring(_agreeCountBear) + " BEAR ↓" : "-"
-    table.cell(_dashTable, 4, 8, _bullAgStr, text_color=_agreeCountBull > 0 ? color.new(#00E676,0) : C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 5, 8, _bearAgStr, text_color=_agreeCountBear > 0 ? color.new(#FF5252,0) : C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 6, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 7, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 8, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 9, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 4, 8, _bullAgStr, text_color=_agreeCountBull > 0 ? color.new(#00E676,0) : C_TXT_DIM, bgcolor=C_NONE, text_size=_dashSz)
+    table.cell(_dashTable, 5, 8, _bearAgStr, text_color=_agreeCountBear > 0 ? color.new(#FF5252,0) : C_TXT_DIM, bgcolor=C_NONE, text_size=_dashSz)
+    _dxyStatusStr = not _dxyActive                          ? "DXY: OFF" :
+         na(dxy_close) or na(dxy_ema20)                     ? "DXY: N/A" :
+         dxy_close < dxy_ema20 and dxy_ema20 < dxy_ema50   ? "DXY ▼▼" :
+         dxy_close < dxy_ema20                               ? "DXY ▼"   :
+         dxy_close > dxy_ema20 and dxy_ema20 > dxy_ema50   ? "DXY ▲▲" :
+         dxy_close > dxy_ema20                               ? "DXY ▲"   : "DXY —"
+    _dxyStatusClr = not _dxyActive or na(dxy_close) ? C_TXT_DIM :
+         dxy_close < dxy_ema20 ? color.new(#00E676, 0) :
+         dxy_close > dxy_ema20 ? color.new(#FF5252, 0) : C_TXT_DIM
+    table.cell(_dashTable, 6, 8, _dxyStatusStr, text_color=_dxyStatusClr, bgcolor=C_NONE, text_size=_dashSz)
+    table.cell(_dashTable, 7, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=_dashSz)
+    table.cell(_dashTable, 8, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=_dashSz)
+    table.cell(_dashTable, 9, 8, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=_dashSz)
 
     // Day Bias row (row 9)
     biasClr = _dayBias == "BULLISH" ? color.new(#00E676,0) :
@@ -1658,16 +1824,16 @@ if i_showDashboard and i_mode == "Multi-Model" and not na(_dashTable)
     biasBG  = _dayBias == "BULLISH" ? color.new(#00E676,85) :
                _dayBias == "BEARISH" ? color.new(#FF1744,85) : C_NONE
     biasScoreStr = str.tostring(math.round(math.abs(_biasScore))) + "%"
-    table.cell(_dashTable, 0, 9, "DAY BIAS",        text_color=C_TXT,    bgcolor=C_HEAD, text_size=size.tiny)
-    table.cell(_dashTable, 1, 9, _dayBias,           text_color=biasClr,  bgcolor=biasBG, text_size=size.tiny)
-    table.cell(_dashTable, 2, 9, biasScoreStr,        text_color=biasClr,  bgcolor=biasBG, text_size=size.tiny)
-    table.cell(_dashTable, 3, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 4, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 5, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 6, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 7, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 8, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
-    table.cell(_dashTable, 9, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=size.tiny)
+    table.cell(_dashTable, 0, 9, "DAY BIAS",        text_color=C_TXT,    bgcolor=C_HEAD, text_size=_dashSz)
+    table.cell(_dashTable, 1, 9, _dayBias,           text_color=biasClr,  bgcolor=biasBG, text_size=_dashSz)
+    table.cell(_dashTable, 2, 9, biasScoreStr,        text_color=biasClr,  bgcolor=biasBG, text_size=_dashSz)
+    table.cell(_dashTable, 3, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=_dashSz)
+    table.cell(_dashTable, 4, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=_dashSz)
+    table.cell(_dashTable, 5, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=_dashSz)
+    table.cell(_dashTable, 6, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=_dashSz)
+    table.cell(_dashTable, 7, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=_dashSz)
+    table.cell(_dashTable, 8, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=_dashSz)
+    table.cell(_dashTable, 9, 9, "",                  text_color=C_TXT_DIM,bgcolor=C_NONE, text_size=_dashSz)
 
 // ============================================================
 // SECTION 19B — ENTRIES / TRADES TABLE (today's trades)
@@ -1675,37 +1841,47 @@ if i_showDashboard and i_mode == "Multi-Model" and not na(_dashTable)
 
 if i_showTradeTable
     if na(_tradeTable)
-        _tradeTable := table.new(f_tablePos(i_tradeTablePos), 6, 13,
+        _tradeTable := table.new(f_tablePos(i_tradeTablePos), 7, 13,
              bgcolor       = color.new(#1A1D26, 10),
              border_color  = color.new(color.gray, 50),
              border_width  = 1,
              frame_color   = color.new(color.gray, 30),
              frame_width   = 1)
 
-    // Header
-    table.cell(_tradeTable, 0, 0, "MODEL",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_tradeTable, 1, 0, "DIR",    text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_tradeTable, 2, 0, "ENTRY",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_tradeTable, 3, 0, "SL",     text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_tradeTable, 4, 0, "TP",     text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_tradeTable, 5, 0, "STATUS", text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    // Header — col 0=MODEL, 1=DIR, 2=ENTRY, 3=SL, 4=TP, 5=PIPS, 6=STATUS
+    table.cell(_tradeTable, 0, 0, "MODEL",  text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_tradeTable, 1, 0, "DIR",    text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_tradeTable, 2, 0, "ENTRY",  text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_tradeTable, 3, 0, "SL",     text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_tradeTable, 4, 0, "TP",     text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_tradeTable, 5, 0, "PIPS",   text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_tradeTable, 6, 0, "STATUS", text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
 
-    // Collect today's trades
-    _todayWins   = 0
-    _todayTotal  = 0
-    _displayRow  = 1
+    // Today's trades only (most recent first), up to 10 rows
+    _todayWins     = 0
+    _todayTotal    = 0
+    _todayPips     = 0.0
+    _displayRow    = 1
     trSz2 = array.size(_trStatus)
     if trSz2 > 0
         for _ti2 = trSz2 - 1 to 0
             if _displayRow > 10
                 break
             if array.get(_trDay, _ti2) == currentDay
-                _tMdl = array.get(_trModel, _ti2)
-                _tDir2 = array.get(_trDir,   _ti2)
-                _tSt  = array.get(_trStatus, _ti2)
-                _tEnt = array.get(_trEntry,  _ti2)
-                _tSl2 = array.get(_trSL,     _ti2)
-                _tTp2 = array.get(_trTP,     _ti2)
+                _tMdl  = array.get(_trModel,  _ti2)
+                _tDir2 = array.get(_trDir,    _ti2)
+                _tSt   = array.get(_trStatus, _ti2)
+                _tEnt  = array.get(_trEntry,  _ti2)
+                _tSl2  = array.get(_trSL,     _ti2)
+                _tTp2  = array.get(_trTP,     _ti2)
+
+                // Pip P&L: closed = TP/SL price; active = current ref_close (live unrealised)
+                _exitP   = _tSt == 1 ? _tTp2 : _tSt == -1 ? _tSl2 : ref_close
+                _pipsRaw = (_exitP - _tEnt) * float(_tDir2) / _pipSize
+                _pipsStr = f_formatPips(_pipsRaw)
+                _pipsClr = _tSt == 0 ? color.new(#FF9800, 0) :
+                           _pipsRaw >= 0 ? color.new(#00E676, 0) : color.new(#FF1744, 0)
+
                 _mNameStr = _tMdl == 1  ? "M1 Crabel" :
                              _tMdl == 3  ? "M3 5min"   :
                              _tMdl == 4  ? "M4 15min"  :
@@ -1718,14 +1894,16 @@ if i_showTradeTable
                 _stStr   = _tSt == 0 ? "IN PROG" : _tSt == 1 ? "TP HIT" : "SL HIT"
                 _stClr   = _tSt == 0 ? color.new(#FF9800,0) : _tSt == 1 ? color.new(#00E676,0) : color.new(#FF1744,0)
                 _rowBG2  = _tSt == 0 ? color.new(#FF9800,85) : _tSt == 1 ? color.new(#00E676,85) : color.new(#FF1744,85)
-                table.cell(_tradeTable, 0, _displayRow, _mNameStr,                           text_color=C_TXT,  bgcolor=_rowBG2, text_size=size.tiny)
-                table.cell(_tradeTable, 1, _displayRow, _dirStr2,                             text_color=_dirClr,bgcolor=_rowBG2, text_size=size.tiny)
-                table.cell(_tradeTable, 2, _displayRow, str.tostring(_tEnt, format.mintick),  text_color=C_TXT,  bgcolor=_rowBG2, text_size=size.tiny)
-                table.cell(_tradeTable, 3, _displayRow, str.tostring(_tSl2, format.mintick),  text_color=color.new(#FF5252,0), bgcolor=_rowBG2, text_size=size.tiny)
-                table.cell(_tradeTable, 4, _displayRow, str.tostring(_tTp2, format.mintick),  text_color=color.new(#69F0AE,0), bgcolor=_rowBG2, text_size=size.tiny)
-                table.cell(_tradeTable, 5, _displayRow, _stStr,                               text_color=_stClr, bgcolor=_rowBG2, text_size=size.tiny)
+                table.cell(_tradeTable, 0, _displayRow, _mNameStr,                           text_color=C_TXT,   bgcolor=_rowBG2, text_size=_dashSz)
+                table.cell(_tradeTable, 1, _displayRow, _dirStr2,                            text_color=_dirClr, bgcolor=_rowBG2, text_size=_dashSz)
+                table.cell(_tradeTable, 2, _displayRow, str.tostring(_tEnt, format.mintick), text_color=C_TXT,   bgcolor=_rowBG2, text_size=_dashSz)
+                table.cell(_tradeTable, 3, _displayRow, str.tostring(_tSl2, format.mintick), text_color=i_colSL, bgcolor=_rowBG2, text_size=_dashSz)
+                table.cell(_tradeTable, 4, _displayRow, str.tostring(_tTp2, format.mintick), text_color=i_colTP, bgcolor=_rowBG2, text_size=_dashSz)
+                table.cell(_tradeTable, 5, _displayRow, _pipsStr,                            text_color=_pipsClr,bgcolor=_rowBG2, text_size=_dashSz)
+                table.cell(_tradeTable, 6, _displayRow, _stStr,                              text_color=_stClr,  bgcolor=_rowBG2, text_size=_dashSz)
                 if _tSt != 0
-                    _todayTotal += 1
+                    _todayTotal  += 1
+                    _todayPips   += _pipsRaw
                     if _tSt == 1
                         _todayWins += 1
                 _displayRow += 1
@@ -1733,26 +1911,25 @@ if i_showTradeTable
     // Fill empty rows up to row 11
     if _displayRow <= 11
         for _er = _displayRow to 11
-            table.cell(_tradeTable, 0, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-            table.cell(_tradeTable, 1, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-            table.cell(_tradeTable, 2, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-            table.cell(_tradeTable, 3, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-            table.cell(_tradeTable, 4, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
-            table.cell(_tradeTable, 5, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=size.tiny)
+            for _ec = 0 to 6
+                table.cell(_tradeTable, _ec, _er, "", text_color=C_TXT_DIM, bgcolor=C_NONE, text_size=_dashSz)
 
-    // Summary row
-    _todayWrStr = _todayTotal > 0 ?
+    // Summary row — win rate + total pip P&L for the day
+    _wrStr   = _todayTotal > 0 ?
          "Today: " + str.tostring(_todayWins) + "/" + str.tostring(_todayTotal) +
          " (" + str.tostring(math.round(float(_todayWins) / float(_todayTotal) * 100)) + "%)" :
          "Today: No completed trades"
-    _summClr = _todayTotal == 0 ? C_TXT_DIM :
+    _wrClr   = _todayTotal == 0 ? C_TXT_DIM :
                float(_todayWins) / float(_todayTotal) >= 0.5 ? color.new(#00E676,0) : color.new(#FF1744,0)
-    table.cell(_tradeTable, 0, 12, _todayWrStr, text_color=_summClr, bgcolor=C_HEAD, text_size=size.tiny)
-    table.cell(_tradeTable, 1, 12, "",           text_color=C_TXT_DIM,bgcolor=C_HEAD, text_size=size.tiny)
-    table.cell(_tradeTable, 2, 12, "",           text_color=C_TXT_DIM,bgcolor=C_HEAD, text_size=size.tiny)
-    table.cell(_tradeTable, 3, 12, "",           text_color=C_TXT_DIM,bgcolor=C_HEAD, text_size=size.tiny)
-    table.cell(_tradeTable, 4, 12, "",           text_color=C_TXT_DIM,bgcolor=C_HEAD, text_size=size.tiny)
-    table.cell(_tradeTable, 5, 12, "",           text_color=C_TXT_DIM,bgcolor=C_HEAD, text_size=size.tiny)
+    _dayPipsStr = _todayTotal > 0 ? "P&L: " + f_formatPips(_todayPips) : ""
+    _dayPipsClr = _todayPips >= 0 ? color.new(#00E676,0) : color.new(#FF1744,0)
+    table.cell(_tradeTable, 0, 12, _wrStr,      text_color=_wrClr,     bgcolor=C_HEAD, text_size=_dashSz)
+    table.cell(_tradeTable, 1, 12, "",           text_color=C_TXT_DIM,  bgcolor=C_HEAD, text_size=_dashSz)
+    table.cell(_tradeTable, 2, 12, "",           text_color=C_TXT_DIM,  bgcolor=C_HEAD, text_size=_dashSz)
+    table.cell(_tradeTable, 3, 12, "",           text_color=C_TXT_DIM,  bgcolor=C_HEAD, text_size=_dashSz)
+    table.cell(_tradeTable, 4, 12, "",           text_color=C_TXT_DIM,  bgcolor=C_HEAD, text_size=_dashSz)
+    table.cell(_tradeTable, 5, 12, _dayPipsStr,  text_color=_dayPipsClr,bgcolor=C_HEAD, text_size=_dashSz)
+    table.cell(_tradeTable, 6, 12, "",           text_color=C_TXT_DIM,  bgcolor=C_HEAD, text_size=_dashSz)
 
 // ============================================================
 // SECTION 19C — BEST MODEL TABLE
@@ -1760,7 +1937,7 @@ if i_showTradeTable
 
 if i_showBestModel
     if na(_bestTable)
-        _bestTable := table.new(f_tablePos(i_bestModelPos), 3, 10,
+        _bestTable := table.new(f_tablePos(i_bestModelPos), 4, 10,
              bgcolor       = color.new(#1A1D26, 10),
              border_color  = color.new(color.gray, 50),
              border_width  = 1,
@@ -1768,9 +1945,10 @@ if i_showBestModel
              frame_width   = 1)
 
     // Header
-    table.cell(_bestTable, 0, 0, "MODEL",  text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_bestTable, 1, 0, "WIN%",   text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
-    table.cell(_bestTable, 2, 0, "TRADES", text_color=C_TXT, bgcolor=C_HEAD, text_size=size.small)
+    table.cell(_bestTable, 0, 0, "MODEL",  text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_bestTable, 1, 0, "WIN%",   text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_bestTable, 2, 0, "TRADES", text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
+    table.cell(_bestTable, 3, 0, "STREAK", text_color=C_TXT, bgcolor=C_HEAD, text_size=_headSz)
 
     _bmNames  = array.from("M1 Crabel","M3 5min","M4 15min","M6 FVG","M7 Gold","M9 FailORB","M10 BDM","Combined")
     _bmIdxs   = array.from(1, 3, 4, 6, 7, 9, 11, 10)
@@ -1781,16 +1959,20 @@ if i_showBestModel
 
     for _bi = 0 to 7
         [_bW, _bL, _bT] = f_winRate(array.get(_bmIdxs, _bi))
-        _bWR   = _bT >= 1 ? float(_bW) / float(_bT) * 100.0 : -1.0
+        _bWR    = _bT >= 1 ? float(_bW) / float(_bT) * 100.0 : -1.0
         _wrStr2 = _bT >= 1 ? str.tostring(math.round(_bWR)) + "%" : "-"
         _trStr  = _bT >= 1 ? str.tostring(_bT) : "0"
         _rowClr = _bT < 3  ? C_TXT_DIM :
                    _bWR >= 60 ? color.new(#00E676,0) :
                    _bWR >= 50 ? color.new(#FF9800,0) : color.new(#FF1744,0)
         _rowBG3 = C_NONE
-        table.cell(_bestTable, 0, _bi + 1, array.get(_bmNames, _bi), text_color=_rowClr, bgcolor=_rowBG3, text_size=size.tiny)
-        table.cell(_bestTable, 1, _bi + 1, _wrStr2,                   text_color=_rowClr, bgcolor=_rowBG3, text_size=size.tiny)
-        table.cell(_bestTable, 2, _bi + 1, _trStr,                    text_color=_rowClr, bgcolor=_rowBG3, text_size=size.tiny)
+        _bStrk  = array.get(_mStreak, array.get(_bmIdxs, _bi) - 1)
+        _strkStr = _bStrk > 0 ? "W" + str.tostring(_bStrk) : _bStrk < 0 ? "L" + str.tostring(math.abs(_bStrk)) : "-"
+        _strkClr = _bStrk > 0 ? color.new(#00E676,0) : _bStrk < 0 ? color.new(#FF1744,0) : C_TXT_DIM
+        table.cell(_bestTable, 0, _bi + 1, array.get(_bmNames, _bi), text_color=_rowClr,  bgcolor=_rowBG3, text_size=_dashSz)
+        table.cell(_bestTable, 1, _bi + 1, _wrStr2,                   text_color=_rowClr,  bgcolor=_rowBG3, text_size=_dashSz)
+        table.cell(_bestTable, 2, _bi + 1, _trStr,                    text_color=_rowClr,  bgcolor=_rowBG3, text_size=_dashSz)
+        table.cell(_bestTable, 3, _bi + 1, _strkStr,                  text_color=_strkClr, bgcolor=_rowBG3, text_size=_dashSz)
         if _bT >= 3 and _bWR > _bestWR
             _bestWR   := _bWR
             _bestName := array.get(_bmNames, _bi)
@@ -1798,19 +1980,24 @@ if i_showBestModel
 
     // Highlight best model row
     if _bestRow > 0
+        _hStrk  = array.get(_mStreak, array.get(_bmIdxs, _bestRow - 1) - 1)
+        _hStrkStr = _hStrk > 0 ? "W" + str.tostring(_hStrk) : _hStrk < 0 ? "L" + str.tostring(math.abs(_hStrk)) : "-"
         table.cell(_bestTable, 0, _bestRow, array.get(_bmNames, _bestRow - 1),
-             text_color=color.new(#FFD600,0), bgcolor=color.new(#FFD600,85), text_size=size.tiny)
+             text_color=color.new(#FFD600,0), bgcolor=color.new(#FFD600,85), text_size=_dashSz)
         table.cell(_bestTable, 1, _bestRow, str.tostring(math.round(_bestWR)) + "%",
-             text_color=color.new(#FFD600,0), bgcolor=color.new(#FFD600,85), text_size=size.tiny)
+             text_color=color.new(#FFD600,0), bgcolor=color.new(#FFD600,85), text_size=_dashSz)
+        table.cell(_bestTable, 3, _bestRow, _hStrkStr,
+             text_color=color.new(#FFD600,0), bgcolor=color.new(#FFD600,85), text_size=_dashSz)
 
     // Summary row
     _summBestStr = _bestName != "" ?
          "BEST: " + _bestName + " " + str.tostring(math.round(_bestWR)) + "%" :
          "BEST: Insufficient data"
     _summBestClr = _bestName != "" ? color.new(#FFD600,0) : C_TXT_DIM
-    table.cell(_bestTable, 0, 9, _summBestStr, text_color=_summBestClr, bgcolor=C_HEAD, text_size=size.tiny)
-    table.cell(_bestTable, 1, 9, "",           text_color=C_TXT_DIM,    bgcolor=C_HEAD, text_size=size.tiny)
-    table.cell(_bestTable, 2, 9, "",           text_color=C_TXT_DIM,    bgcolor=C_HEAD, text_size=size.tiny)
+    table.cell(_bestTable, 0, 9, _summBestStr, text_color=_summBestClr, bgcolor=C_HEAD, text_size=_dashSz)
+    table.cell(_bestTable, 1, 9, "",           text_color=C_TXT_DIM,    bgcolor=C_HEAD, text_size=_dashSz)
+    table.cell(_bestTable, 2, 9, "",           text_color=C_TXT_DIM,    bgcolor=C_HEAD, text_size=_dashSz)
+    table.cell(_bestTable, 3, 9, "",           text_color=C_TXT_DIM,    bgcolor=C_HEAD, text_size=_dashSz)
 
 // ============================================================
 // SECTION 20 — OBJECT CLEANUP (keep under 490 per type)
@@ -1828,66 +2015,66 @@ while array.size(_labels) > 490
 // ============================================================
 
 // Model 1 — Classic Crabel
-plotshape(sig_m1_bull and i_m1_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
+plotshape(sig_m1_bull and i_m1_on and _agreeCountBull >= i_minAgree,
      title="M1 Crabel — Long",  style=shape.triangleup,   location=location.belowbar,
      color=i_colBull,  size=size.small,  text="M1",  textcolor=color.white)
-plotshape(sig_m1_bear and i_m1_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
+plotshape(sig_m1_bear and i_m1_on and _agreeCountBear >= i_minAgree,
      title="M1 Crabel — Short", style=shape.triangledown, location=location.abovebar,
      color=i_colBear,  size=size.small,  text="M1",  textcolor=color.white)
 
 // Model 3 — 5-Min Scalper
-plotshape(sig_m3_bull and i_m3_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
+plotshape(sig_m3_bull and i_m3_on and _agreeCountBull >= i_minAgree,
      title="M3 5min — Long",  style=shape.triangleup,   location=location.belowbar,
      color=color.new(#00BCD4,0), size=size.small, text="M3", textcolor=color.white)
-plotshape(sig_m3_bear and i_m3_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
+plotshape(sig_m3_bear and i_m3_on and _agreeCountBear >= i_minAgree,
      title="M3 5min — Short", style=shape.triangledown, location=location.abovebar,
      color=color.new(#00BCD4,0), size=size.small, text="M3", textcolor=color.white)
 
 // Model 4 — Standard 15-Min (larger arrow — reference model)
-plotshape(sig_m4_bull and i_m4_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
+plotshape(sig_m4_bull and i_m4_on and _agreeCountBull >= i_minAgree,
      title="M4 15min — Long",  style=shape.arrowup,   location=location.belowbar,
      color=i_colBull,  size=size.normal, text="M4", textcolor=color.white)
-plotshape(sig_m4_bear and i_m4_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
+plotshape(sig_m4_bear and i_m4_on and _agreeCountBear >= i_minAgree,
      title="M4 15min — Short", style=shape.arrowdown, location=location.abovebar,
      color=i_colBear,  size=size.normal, text="M4", textcolor=color.white)
 
 // Model 6 — FVG ORB
-plotshape(sig_m6_bull and i_m6_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
+plotshape(sig_m6_bull and i_m6_on and _agreeCountBull >= i_minAgree,
      title="M6 FVG — Long",  style=shape.diamond, location=location.belowbar,
      color=color.new(#E040FB,0), size=size.small, text="M6", textcolor=color.white)
-plotshape(sig_m6_bear and i_m6_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
+plotshape(sig_m6_bear and i_m6_on and _agreeCountBear >= i_minAgree,
      title="M6 FVG — Short", style=shape.diamond, location=location.abovebar,
      color=color.new(#E040FB,0), size=size.small, text="M6", textcolor=color.white)
 
 // Model 7 — Gold ORB
-plotshape(sig_m7_bull and i_m7_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
+plotshape(sig_m7_bull and i_m7_on and _agreeCountBull >= i_minAgree,
      title="M7 Gold — Long",  style=shape.circle, location=location.belowbar,
      color=color.new(#FFD600,0), size=size.small, text="M7", textcolor=color.white)
-plotshape(sig_m7_bear and i_m7_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
+plotshape(sig_m7_bear and i_m7_on and _agreeCountBear >= i_minAgree,
      title="M7 Gold — Short", style=shape.circle, location=location.abovebar,
      color=color.new(#FFD600,0), size=size.small, text="M7", textcolor=color.white)
 
-// Model 9 — Failed ORB Reversal
-plotshape(sig_m9_bull and i_m9_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
+// Model 9 — Failed ORB Reversal (no agreement gate — counter-consensus by design)
+plotshape(sig_m9_bull and i_m9_on,
      title="M9 FailORB — Long",  style=shape.xcross, location=location.belowbar,
      color=i_colBull,  size=size.small, text="M9", textcolor=color.white)
-plotshape(sig_m9_bear and i_m9_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
+plotshape(sig_m9_bear and i_m9_on,
      title="M9 FailORB — Short", style=shape.xcross, location=location.abovebar,
      color=i_colBear,  size=size.small, text="M9", textcolor=color.white)
 
 // Model 10 — BDM ORB
-plotshape(sig_m10_bull and i_m10_on and i_mode=="Multi-Model" and _agreeCountBull >= i_minAgree,
+plotshape(sig_m10_bull and i_m10_on and _agreeCountBull >= i_minAgree,
      title="M10 BDM — Long",  style=shape.triangleup,   location=location.belowbar,
      color=i_colBull, size=size.small, text="M10", textcolor=color.white)
-plotshape(sig_m10_bear and i_m10_on and i_mode=="Multi-Model" and _agreeCountBear >= i_minAgree,
+plotshape(sig_m10_bear and i_m10_on and _agreeCountBear >= i_minAgree,
      title="M10 BDM — Short", style=shape.triangledown, location=location.abovebar,
      color=i_colBear, size=size.small, text="M10", textcolor=color.white)
 
 // Combined Mode
-plotshape(sig_comb_bull and i_mode=="Combined",
+plotshape(sig_comb_bull and i_comb_on,
      title="Combined — Long",  style=shape.arrowup,   location=location.belowbar,
      color=i_colBull,  size=size.large, text="ORB+", textcolor=color.white)
-plotshape(sig_comb_bear and i_mode=="Combined",
+plotshape(sig_comb_bear and i_comb_on,
      title="Combined — Short", style=shape.arrowdown, location=location.abovebar,
      color=i_colBear,  size=size.large, text="ORB+", textcolor=color.white)
 
@@ -1905,8 +2092,8 @@ alertcondition(sig_m6_bull  and _agreeCountBull >= i_minAgree, title="M6 FVG ORB
 alertcondition(sig_m6_bear  and _agreeCountBear >= i_minAgree, title="M6 FVG ORB — SHORT",             message="ORB M6 FVG SHORT | {{ticker}} | {{close}}")
 alertcondition(sig_m7_bull  and _agreeCountBull >= i_minAgree, title="M7 Gold ORB — LONG",             message="ORB M7 Gold LONG | {{ticker}} | {{close}}")
 alertcondition(sig_m7_bear  and _agreeCountBear >= i_minAgree, title="M7 Gold ORB — SHORT",            message="ORB M7 Gold SHORT | {{ticker}} | {{close}}")
-alertcondition(sig_m9_bull  and _agreeCountBull >= i_minAgree, title="M9 Failed ORB — LONG (Reversal)", message="ORB M9 FailORB LONG | {{ticker}} | {{close}}")
-alertcondition(sig_m9_bear  and _agreeCountBear >= i_minAgree, title="M9 Failed ORB — SHORT (Reversal)",message="ORB M9 FailORB SHORT | {{ticker}} | {{close}}")
+alertcondition(sig_m9_bull  and i_m9_on, title="M9 Failed ORB — LONG (Reversal)", message="ORB M9 FailORB LONG | {{ticker}} | {{close}}")
+alertcondition(sig_m9_bear  and i_m9_on, title="M9 Failed ORB — SHORT (Reversal)",message="ORB M9 FailORB SHORT | {{ticker}} | {{close}}")
 alertcondition(sig_m10_bull and _agreeCountBull >= i_minAgree, title="M10 BDM ORB — LONG",              message="ORB M10 BDM LONG | {{ticker}} | {{close}}")
 alertcondition(sig_m10_bear and _agreeCountBear >= i_minAgree, title="M10 BDM ORB — SHORT",             message="ORB M10 BDM SHORT | {{ticker}} | {{close}}")
 alertcondition(sig_comb_bull, title="Combined ORB+ — LONG",  message="ORB Combined LONG | {{ticker}} | {{close}}")
@@ -1927,43 +2114,54 @@ alertcondition(
 // ============================================================
 
 if _refEdge or _fastEdge
+    // Pre-compute agree suffixes (M9 excluded — counter-consensus model)
+    _agBull = " | agree:" + str.tostring(_agreeCountBull)
+    _agBear = " | agree:" + str.tostring(_agreeCountBear)
+    _tkr    = syminfo.ticker
+    _ep     = str.tostring(close, format.mintick)
+
     if sig_m1_bull
-        alert("ORB M1 Crabel LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M1 Crabel LONG | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(true,  fast_close, fast_rvol, ref_vwap, ref_rsi14)) + _agBull, alert.freq_once_per_bar_close)
     if sig_m1_bear
-        alert("ORB M1 Crabel SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M1 Crabel SHORT | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(false, fast_close, fast_rvol, ref_vwap, ref_rsi14)) + _agBear, alert.freq_once_per_bar_close)
     if sig_m3_bull
-        alert("ORB M3 5min Scalper LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M3 5min Scalper LONG | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(true,  ref_close, ref_rvol, ref_vwap, ref_rsi14)) + _agBull, alert.freq_once_per_bar_close)
     if sig_m3_bear
-        alert("ORB M3 5min Scalper SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M3 5min Scalper SHORT | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(false, ref_close, ref_rvol, ref_vwap, ref_rsi14)) + _agBear, alert.freq_once_per_bar_close)
     if sig_m4_bull
-        alert("ORB M4 15min Standard LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M4 15min Standard LONG | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(true,  ref_close, ref_rvol, ref_vwap, ref_rsi14)) + _agBull, alert.freq_once_per_bar_close)
     if sig_m4_bear
-        alert("ORB M4 15min Standard SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M4 15min Standard SHORT | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(false, ref_close, ref_rvol, ref_vwap, ref_rsi14)) + _agBear, alert.freq_once_per_bar_close)
     if sig_m6_bull
-        alert("ORB M6 FVG LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M6 FVG LONG | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(true,  ref_close, ref_rvol, ref_vwap, ref_rsi14)) + _agBull, alert.freq_once_per_bar_close)
     if sig_m6_bear
-        alert("ORB M6 FVG SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M6 FVG SHORT | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(false, ref_close, ref_rvol, ref_vwap, ref_rsi14)) + _agBear, alert.freq_once_per_bar_close)
     if sig_m7_bull
-        alert("ORB M7 Gold LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M7 Gold LONG | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(true,  ref_close, ref_rvol, ref_vwap, ref_rsi14)) + _agBull, alert.freq_once_per_bar_close)
     if sig_m7_bear
-        alert("ORB M7 Gold SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M7 Gold SHORT | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(false, ref_close, ref_rvol, ref_vwap, ref_rsi14)) + _agBear, alert.freq_once_per_bar_close)
     if sig_m9_bull
-        alert("ORB M9 Failed ORB Bull Reversal LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M9 FailORB Reversal LONG | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(true,  ref_close, ref_rvol, ref_vwap, ref_rsi14)), alert.freq_once_per_bar_close)
     if sig_m9_bear
-        alert("ORB M9 Failed ORB Bear Reversal SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M9 FailORB Reversal SHORT | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(false, ref_close, ref_rvol, ref_vwap, ref_rsi14)), alert.freq_once_per_bar_close)
     if sig_m10_bull
-        alert("ORB M10 BDM LONG | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M10 BDM LONG | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(true,  ref_close, ref_rvol, ref_vwap, ref_rsi14)) + _agBull, alert.freq_once_per_bar_close)
     if sig_m10_bear
-        alert("ORB M10 BDM SHORT | " + syminfo.ticker + " | Entry: " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        alert("ORB M10 BDM SHORT | " + _tkr + " | Entry: " + _ep + " | score:" + str.tostring(f_modelScore(false, ref_close, ref_rvol, ref_vwap, ref_rsi14)) + _agBear, alert.freq_once_per_bar_close)
+    _dxyAlertSuffix = not _dxyActive ? "" :
+         na(dxy_close) or na(dxy_ema20) ? " | DXY: N/A" :
+         dxy_close < dxy_ema20          ? " | DXY: BEAR (Gold+)" : " | DXY: BULL (Gold-)"
     if sig_comb_bull
-        alert("ORB Combined LONG | " + syminfo.ticker +
-             " | Entry: " + str.tostring(close, format.mintick) +
-             " | Score: " + str.tostring(math.round(_confScore)) + "% [" + _confGrade + "]",
+        alert("ORB Combined LONG | " + _tkr +
+             " | Entry: " + _ep +
+             " | Score: " + str.tostring(math.round(_confScore)) + "% [" + _confGrade + "]" +
+             _dxyAlertSuffix,
              alert.freq_once_per_bar_close)
     if sig_comb_bear
-        alert("ORB Combined SHORT | " + syminfo.ticker +
-             " | Entry: " + str.tostring(close, format.mintick) +
-             " | Score: " + str.tostring(math.round(_confScore)) + "% [" + _confGrade + "]",
+        alert("ORB Combined SHORT | " + _tkr +
+             " | Entry: " + _ep +
+             " | Score: " + str.tostring(math.round(_confScore)) + "% [" + _confGrade + "]" +
+             _dxyAlertSuffix,
              alert.freq_once_per_bar_close)
 
 // ============================================================
@@ -1973,6 +2171,9 @@ if _refEdge or _fastEdge
 // Highlight OR windows
 bgcolor(in15MinOR ? color.new(#2196F3, 92) : na, title="15-Min OR Window Highlight")
 bgcolor(in5MinOR  ? color.new(#00BCD4, 88) : na, title="5-Min OR Window Highlight")
+
+// Prime window highlight — gold tint on first 30 min of NY session
+bgcolor(i_showPrimeWindow and _primeWindow ? color.new(#FFD600, 91) : na, title="Prime Window Highlight (9:30-10:00 NY)")
 
 // Color bars with abnormally high RVOL
 barcolor(rvol >= 2.0 ? color.new(#FF6F00, 0) : rvol >= 1.5 ? color.new(#F9A825, 30) : na,
