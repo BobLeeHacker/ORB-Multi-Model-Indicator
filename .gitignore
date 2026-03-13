@@ -1,9 +1,0 @@
-# Internal/Claude tooling
-.claude/
-CLAUDE.md
-docs/superpowers/
-implementation_progress.md
-
-# OS
-Thumbs.db
-.DS_Store
